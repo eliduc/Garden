@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Prunus brigantina
+Italian Name: Pruno del Briançonnais
+English Name: Briançon Apricot
+
+PlantNet Identification:
+   Prunus brigantina Vill.
+   Confidence: 67.4%
+   Family: Rosaceae
+   Genus: Prunus
+
+Description:
+A rare fruit tree species native to the French Alps, similar to apricot. Grows well in Mediterranean climates with proper care, though traditionally found in mountainous regions. Requires well-draining soil and moderate moisture.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        28/28/35        30/20/20        50/50/50       
+Autumn       12/12/12        22/22/25        35/25/30        60/60/60       
+Winter       3/3/5           12/12/15        40/30/40        65/70/70       
+Spring       10/12/10        20/22/25        40/25/30        60/60/60       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              30              23              50             
+Autumn       12              23              30              60             
+Winter       4               13              37              68             
+Spring       11              22              32              60             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:52:49

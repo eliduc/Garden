@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Pyrus cordata
+Italian Name: Pero selvatico
+English Name: Plymouth Pear
+
+PlantNet Identification:
+   Pyrus cordata Desv.
+   Confidence: 61.5%
+   Family: Rosaceae
+   Genus: Pyrus
+
+Description:
+A small deciduous tree native to western Europe, typically reaching 8-10m in height. Well-adapted to Mediterranean climates, tolerant of various soil conditions but prefers well-draining soil.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        28/30/28        30/20/40        50/50/70       
+Autumn       12/12/12        22/22/22        40/30/50        65/60/80       
+Winter       6/5/5           15/15/15        45/40/60        70/70/90       
+Spring       12/10/10        24/20/20        35/30/50        60/60/80       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              29              30              57             
+Autumn       12              22              40              68             
+Winter       5               15              48              77             
+Spring       11              21              38              67             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:50:17

@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Malus domestica
+Italian Name: Melo domestico
+English Name: Apple tree
+
+PlantNet Identification:
+   Malus domestica (Suckow) Borkh.
+   Confidence: 28.6%
+   Family: Rosaceae
+   Genus: Malus
+
+Description:
+Deciduous fruit tree well-adapted to Mediterranean climates when proper cultivars are selected. Requires winter chill hours but can tolerate Rome's mild winters. Benefits from well-draining soil with consistent moisture.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        27/28/28        40/30/40        65/50/70       
+Autumn       12/10/12        22/20/22        35/35/50        60/60/80       
+Winter       4/5/5           12/12/15        30/40/60        55/70/90       
+Spring       10/12/10        20/22/20        45/35/50        70/55/80       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              28              37              62             
+Autumn       11              21              40              67             
+Winter       5               13              43              72             
+Spring       11              21              43              68             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:48:45

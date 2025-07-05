@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Polygala myrtifolia
+Italian Name: Poligala
+English Name: Myrtle-leaf Milkwort
+
+PlantNet Identification:
+   Polygala myrtifolia L.
+   Confidence: 91.3%
+   Family: Polygalaceae
+   Genus: Polygala
+
+Description:
+An evergreen shrub native to South Africa that adapts well to Mediterranean climates. Popular in Italian gardens for its purple-pink flowers and tolerance to coastal conditions.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        32/28/35        30/20/20        50/50/50       
+Autumn       12/12/12        25/22/25        40/25/30        60/60/60       
+Winter       7/8/5           18/15/18        30/30/40        55/70/70       
+Spring       12/12/12        25/24/25        40/25/30        60/60/60       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              32              23              50             
+Autumn       12              24              32              60             
+Winter       7               17              33              65             
+Spring       12              25              32              60             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:57:12

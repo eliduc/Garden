@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Olea europaea
+Italian Name: Olivo
+English Name: Olive tree
+
+PlantNet Identification:
+   Olea europaea L.
+   Confidence: 60.7%
+   Family: Oleaceae
+   Genus: Olea
+
+Description:
+Evergreen tree native to Mediterranean regions, well-adapted to hot summers and mild winters. Requires well-draining soil and tolerates drought conditions once established.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/20/18        35/30/35        20/15/20        45/40/60       
+Autumn       12/15/12        25/25/25        30/20/30        60/50/70       
+Winter       5/10/5          18/20/15        35/25/40        65/60/80       
+Spring       12/15/12        25/25/25        30/20/30        55/50/70       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       19              33              18              48             
+Autumn       13              25              27              60             
+Winter       7               18              33              68             
+Spring       13              25              27              58             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:56:17

@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Magnolia virginiana
+Italian Name: Magnolia della Virginia
+English Name: Sweetbay Magnolia
+
+PlantNet Identification:
+   Magnolia virginiana L.
+   Confidence: 66.1%
+   Family: Magnoliaceae
+   Genus: Magnolia
+
+Description:
+A semi-evergreen to deciduous tree that adapts well to Mediterranean climates when provided adequate moisture. Native to the eastern United States, it requires consistently moist, slightly acidic soil but can tolerate Rome's climate with proper care.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/20/18        28/30/28        40/40/40        70/70/70       
+Autumn       12/15/12        22/25/22        35/50/50        65/80/80       
+Winter       6/10/8          16/15/18        30/50/60        60/80/85       
+Spring       13/15/15        24/25/25        40/50/40        70/80/70       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       19              29              40              70             
+Autumn       13              23              45              75             
+Winter       8               16              47              75             
+Spring       14              25              43              73             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:46:06

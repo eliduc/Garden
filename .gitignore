@@ -1,0 +1,16 @@
+# Database files 
+*.db 
+*.sqlite 
+*.sqlite3 
+ 
+# Configuration with sensitive data 
+garden.ini 
+ 
+# Python 
+__pycache__/ 
+*.py[cod] 
+venv/ 
+ 
+# OS 
+.DS_Store 
+Thumbs.db 

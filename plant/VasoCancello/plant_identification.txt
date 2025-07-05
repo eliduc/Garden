@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Myrtus communis
+Italian Name: Mirto comune
+English Name: Common myrtle
+
+PlantNet Identification:
+   Myrtus communis L.
+   Confidence: 63.6%
+   Family: Myrtaceae
+   Genus: Myrtus
+
+Description:
+An evergreen shrub native to Mediterranean regions, well-adapted to Rome's climate. Produces aromatic leaves and white flowers followed by blue-black berries.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        35/30/35        30/30/20        50/50/50       
+Autumn       12/12/12        25/25/25        40/40/30        60/60/60       
+Winter       5/5/5           18/15/15        30/50/40        55/70/70       
+Spring       12/12/12        25/25/25        40/40/30        60/60/60       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              33              27              50             
+Autumn       12              25              37              60             
+Winter       5               16              40              65             
+Spring       12              25              37              60             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:56:45

@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Euphorbia lophogona
+Italian Name: Euforbia del Madagascar
+English Name: Madagascar Jewel
+
+PlantNet Identification:
+   Euphorbia lophogona Lam.
+   Confidence: 62.5%
+   Family: Euphorbiaceae
+   Genus: Euphorbia
+
+Description:
+A succulent plant native to Madagascar, characterized by its vertical growth pattern and zigzag stems. Requires well-draining soil and protection from cold temperatures. In Rome's climate, it needs protection or indoor placement during winter.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/20/20        32/30/35        30/10/20        50/40/50       
+Autumn       15/15/15        25/25/25        25/20/25        45/50/60       
+Winter       12/10/10        20/18/20        20/30/30        40/60/70       
+Spring       15/15/15        28/25/25        30/20/25        50/50/60       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       19              32              20              47             
+Autumn       15              25              23              52             
+Winter       11              19              27              57             
+Spring       15              26              25              53             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:47:15

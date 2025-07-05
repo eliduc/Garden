@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Pinus pinea
+Italian Name: Pino domestico
+English Name: Stone Pine
+
+PlantNet Identification:
+   Pinus pinea L.
+   Confidence: 73.4%
+   Family: Pinaceae
+   Genus: Pinus
+
+Description:
+Iconic Mediterranean pine tree with umbrella-shaped crown, well-adapted to Rome's climate. Tolerates drought and coastal conditions. Prefers well-draining sandy to loamy soils.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/15        35/28/35        20/20/10        50/50/50       
+Autumn       12/13/10        25/22/25        30/25/20        60/60/70       
+Winter       5/8/5           18/15/15        35/30/30        65/70/80       
+Spring       12/13/10        28/24/25        25/25/20        55/60/70       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       17              33              17              50             
+Autumn       12              24              25              63             
+Winter       6               16              32              72             
+Spring       12              26              23              62             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:51:19

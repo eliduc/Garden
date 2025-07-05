@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Citrus japonica
+Italian Name: Kumquat
+English Name: Kumquat
+
+PlantNet Identification:
+   Citrus japonica Thunb.
+   Confidence: 64.9%
+   Family: Rutaceae
+   Genus: Citrus
+
+Description:
+Small evergreen citrus tree producing small, oval-shaped orange fruits that can be eaten whole, including the peel. More cold-hardy than most citrus species, making it suitable for Rome's climate.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/20/18        32/30/28        40/40/40        60/60/70       
+Autumn       12/15/15        25/25/24        45/50/50        65/70/80       
+Winter       8/10/10         18/20/18        40/50/60        60/80/85       
+Spring       15/15/12        28/25/22        45/45/50        65/65/75       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       19              30              40              63             
+Autumn       14              25              48              72             
+Winter       9               19              50              75             
+Spring       14              25              47              68             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:47:44

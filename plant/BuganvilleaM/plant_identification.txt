@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Bougainvillea glabra
+Italian Name: Buganvillea
+English Name: Paper Flower
+
+PlantNet Identification:
+   Bougainvillea glabra Choisy
+   Confidence: 85.5%
+   Family: Nyctaginaceae
+   Genus: Bougainvillea
+
+Description:
+A vigorous evergreen climber well-suited to Mediterranean climates, producing vibrant purple-magenta bracts. Drought-tolerant once established and thrives in Rome's climate, though needs protection from prolonged frost.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/20/20        35/35/35        30/10/40        50/40/70       
+Autumn       12/15/15        25/25/25        35/20/50        60/50/80       
+Winter       7/10/10         18/20/20        30/30/60        55/60/85       
+Spring       15/18/15        28/28/25        35/20/50        60/50/80       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       19              35              27              53             
+Autumn       14              25              35              63             
+Winter       9               19              40              67             
+Spring       16              27              35              63             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:44:31

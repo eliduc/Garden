@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Salvia jordanii
+Italian Name: Salvia di Jordan
+English Name: Jordan's Sage
+
+PlantNet Identification:
+   Salvia jordanii J.B.Walker
+   Confidence: 96.5%
+   Family: Lamiaceae
+   Genus: Salvia
+
+Description:
+A drought-tolerant Mediterranean sage species well-adapted to the Roman climate. Forms a small shrub with aromatic foliage and violet-blue flowers. Prefers well-draining soils and full sun exposure.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        35/30/35        20/20/15        45/55/50       
+Autumn       12/13/12        25/25/25        30/25/20        60/60/60       
+Winter       5/5/5           18/15/18        35/30/30        65/70/70       
+Spring       12/13/12        25/25/25        30/25/20        55/60/60       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              33              18              50             
+Autumn       12              25              25              60             
+Winter       5               17              32              68             
+Spring       12              25              25              58             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:55:14

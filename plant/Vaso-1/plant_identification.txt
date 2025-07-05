@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Bougainvillea glabra
+Italian Name: Buganvillea
+English Name: Paper Flower
+
+PlantNet Identification:
+   Bougainvillea glabra Choisy
+   Confidence: 80.7%
+   Family: Nyctaginaceae
+   Genus: Bougainvillea
+
+Description:
+A vigorous climbing vine native to Brazil, well-adapted to Mediterranean climates. Produces vibrant purple-magenta bracts and requires well-draining soil. Drought-tolerant once established.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       20/20/20        35/30/35        30/10/40        50/40/70       
+Autumn       15/15/15        25/25/25        40/20/40        60/50/70       
+Winter       8/10/10         18/20/20        30/30/50        50/60/80       
+Spring       15/15/15        25/25/25        40/20/40        60/50/70       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       20              33              27              53             
+Autumn       15              25              33              60             
+Winter       9               19              37              63             
+Spring       15              25              33              60             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:54:16

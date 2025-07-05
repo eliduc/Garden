@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Quercus ilex
+Italian Name: Leccio
+English Name: Holm Oak
+
+PlantNet Identification:
+   Quercus ilex L.
+   Confidence: 42.6%
+   Family: Fagaceae
+   Genus: Quercus
+
+Description:
+An evergreen oak tree native to the Mediterranean region, well-adapted to the local climate of Rome. Highly drought-tolerant once established and perfectly suited to Mediterranean conditions.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        35/28/35        20/10/25        50/30/65       
+Autumn       12/13/12        25/22/28        30/20/35        65/50/75       
+Winter       5/8/5           18/15/18        35/30/45        70/60/85       
+Spring       12/13/10        28/23/25        30/20/30        65/50/70       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              33              18              48             
+Autumn       12              25              28              63             
+Winter       6               17              37              72             
+Spring       12              25              27              62             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:53:50

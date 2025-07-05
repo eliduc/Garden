@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Citrus × aurantium
+Italian Name: Arancio amaro
+English Name: Bitter orange
+
+PlantNet Identification:
+   Citrus × aurantium L.
+   Confidence: 29.3%
+   Family: Rutaceae
+   Genus: Citrus
+
+Description:
+Evergreen citrus tree well-adapted to Mediterranean climates, commonly used as ornamental and for essential oil production. More cold-hardy than sweet orange.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/18/18        32/30/28        30/20/40        50/50/70       
+Autumn       12/12/12        25/25/22        35/30/50        60/60/80       
+Winter       8/8/8           18/15/18        40/40/60        65/70/85       
+Spring       15/12/12        28/25/22        35/30/50        55/60/80       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18              30              30              57             
+Autumn       12              24              38              67             
+Winter       8               17              47              73             
+Spring       13              25              38              65             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:48:14

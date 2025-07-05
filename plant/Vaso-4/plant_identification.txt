@@ -1,0 +1,41 @@
+Plant Identification
+===================
+
+Latin Name: Euonymus fortunei
+Italian Name: Evonimo
+English Name: Winter Creeper
+
+PlantNet Identification:
+   Euonymus fortunei (Turcz.) Hand.-Mazz.
+   Confidence: 42.7%
+   Family: Celastraceae
+   Genus: Euonymus
+
+Description:
+An evergreen woody vine or shrub that is adaptable to various growing conditions and commonly used as ground cover or climbing vine in Mediterranean gardens. Well-suited to Rome's climate, though prefers some shade during intense summer heat.
+
+
+Soil Requirements for Rome, Italy:
+Models used: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       18/15/18        28/30/35        30/30/20        65/60/60       
+Autumn       12/10/12        22/25/25        35/35/30        70/75/70       
+Winter       5/5/5           15/15/18        40/40/40        75/80/75       
+Spring       12/10/10        24/25/28        35/35/30        70/75/70       
+
+
+Averaged Values (rounded to nearest 1):
+======================================================================
+Season       Tmin (°C)       Tmax (°C)       Hmin (%)        Hmax (%)       
+----------------------------------------------------------------------
+Summer       17              31              27              62             
+Autumn       11              24              33              72             
+Winter       5               16              40              77             
+Spring       11              26              33              72             
+
+---
+Identification performed using: Claude Sonnet 3.5, OpenAI GPT-4o, Google Gemini 1.5 Pro
+PlantNet verification: Yes
+Date: 2025-06-30 15:55:44
