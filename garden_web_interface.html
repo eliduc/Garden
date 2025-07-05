@@ -610,9 +610,6 @@
 
         // --- ОБРАБОТЧИКИ СОБЫТИЙ (КЛИКИ, КАСАНИЯ) ---
 
-        /**
-         * ИСПРАВЛЕНО: Назначаем все слушатели событий, чтобы работали и мышь, и касания на гибридных устройствах.
-         */
         function setupCanvasEvents() {
             // Для кликов и тапов
             canvas.addEventListener('click', handleCanvasClick, { passive: false });
@@ -632,10 +629,7 @@
             canvas.addEventListener('wheel', handleCanvasWheel, { passive: false });
         }
 
-        // НОВЫЙ обработчик для нативного 'click'
         function handleCanvasClick(event) {
-            // Если было перетаскивание, то браузер не должен сгенерировать 'click'.
-            // Но на всякий случай проверяем наш флаг.
             if (isDragging) return;
 
             const rect = canvas.getBoundingClientRect();
@@ -644,7 +638,6 @@
             handleItemSelection(x, y);
         }
 
-        // Обработчики MOUSE DOWN/MOVE/UP теперь отвечают только за ПЕРЕТАСКИВАНИЕ
         function handleCanvasMouseDown(event) {
             if (event.button !== 0) return;
             isMouseDown = true;
@@ -658,7 +651,6 @@
         function handleCanvasMouseMove(event) {
             if (!isMouseDown) return;
 
-            // Начинаем перетаскивание, только если курсор сдвинулся
             if (!isDragging && Math.hypot(event.clientX - mouseDownX, event.clientY - mouseDownY) > 5) {
                 isDragging = true;
             }
@@ -673,14 +665,12 @@
         
         function handleCanvasMouseUp(event) {
             isMouseDown = false;
-            // Сбрасываем isDragging немного позже, чтобы click-handler успел его проверить
             setTimeout(() => { isDragging = false; }, 0); 
             document.getElementById('canvas-container').classList.remove('grabbing');
         }
 
-        // Обработчики TOUCHSTART/MOVE/END отвечают за касания
         function handleTouchStart(event) {
-            isMouseDown = true; // Используем как общий флаг "касание/нажатие началось"
+            isMouseDown = true;
             isDragging = false;
             touchStartTime = Date.now();
 
@@ -703,15 +693,13 @@
         function handleTouchEnd(event) {
             isMouseDown = false;
             const touchDuration = Date.now() - touchStartTime;
-            // Вызываем handleItemSelection для тапа, который не был перетаскиванием
             if (event.touches.length === 0 && !isDragging && touchDuration < 300) {
                 const now = Date.now();
-                if (now - lastTouchEnd < 300) return; // Предотвращение двойного тапа
+                if (now - lastTouchEnd < 300) return;
                 lastTouchEnd = now;
                 handleItemSelection(touchStartPos.x, touchStartPos.y);
             }
 
-            // Сбрасываем isDragging немного позже
             setTimeout(() => { isDragging = false; }, 0);
         }
         
@@ -720,7 +708,7 @@
             let plantTapped = null;
 
             for (const plant of gardenData.plants) {
-                const isMobile = window.innerWidth < 768; // Динамическая проверка
+                const isMobile = window.innerWidth < 768;
                 const visualBaseSize = isMobile ? 45 : 55;
                 const pos = transformPoint(plant.position[0], plant.position[1]);
                 const size = visualBaseSize * scale;
@@ -862,7 +850,6 @@
                 plaque.id = `plaque-${plant.sensor_id}`;
                 plaque.className = 'sensor-plaque';
                 
-                // Используем 'click', а не кастомный обработчик
                 plaque.addEventListener('click', (e) => {
                     e.stopPropagation();
                     showPlantInfo(plant);
@@ -872,9 +859,16 @@
             }
             
             const data = sensorData[plant.sensor_id];
-            if (!data || data.sensor_state === 0) {
-                plaque.innerHTML = `<div style="color: #d32f2f; font-weight: bold;">Sensor offline</div>`;
+            if (!data) {
+                // Нет данных - датчик еще не опрашивался
+                plaque.innerHTML = `<div style="color: #757575; font-weight: bold;">No data yet</div>
+                                   <div style="font-size: 10px; color: #757575;">Waiting for first reading...</div>`;
+            } else if (data.sensor_state === 0) {
+                // Датчик действительно offline
+                plaque.innerHTML = `<div style="color: #d32f2f; font-weight: bold;">Sensor offline</div>
+                                   <div style="font-size: 10px; color: #999;">Last seen: ${data.date} ${data.time}</div>`;
             } else {
+                // Датчик online, показываем данные
                 const info = plantInfo[plant.name] || {};
                 const season = getCurrentSeason();
                 const humClass = getHumidityClass(data.humidity, info, season);
@@ -917,12 +911,14 @@
         }
 
         // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-        // Остальные функции без изменений...
 
         function getOverallStatus(plant) {
             const data = sensorData[plant.sensor_id];
-            if (!data || data.sensor_state === 0) {
-                return { level: 3, color: '#424242' }; // Offline
+            if (!data) {
+                return { level: 4, color: '#757575' }; // Gray - no data
+            }
+            if (data.sensor_state === 0) {
+                return { level: 3, color: '#424242' }; // Dark gray - offline
             }
             const info = plantInfo[plant.name] || {};
             const season = getCurrentSeason();
