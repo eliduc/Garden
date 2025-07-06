@@ -8,6 +8,7 @@ import tinytuya
 import threading
 import signal
 import sys
+import argparse
 
 # Configure SQLite to work with datetime properly in Python 3.12+
 sqlite3.register_adapter(datetime, lambda val: val.isoformat())
@@ -193,19 +194,57 @@ def continuous_polling(frequency):
     print(f"\nStarting continuous polling every {frequency} seconds...")
     print("Press Ctrl+C to stop\n")
     
+    trigger_file = 'poll_trigger.txt'
+    last_trigger_time = 0
+    last_poll_time = 0
+    
     while True:
         try:
-            print(f"\n--- Polling at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-            conn = sqlite3.connect(DB_FILE)
-            poll_sensors(conn)
-            conn.close()
-            time.sleep(frequency)
+            # Check for trigger file
+            trigger_now = False
+            if os.path.exists(trigger_file):
+                try:
+                    with open(trigger_file, 'r') as f:
+                        trigger_time = float(f.read().strip())
+                        if trigger_time > last_trigger_time:
+                            trigger_now = True
+                            last_trigger_time = trigger_time
+                            print(f"\n--- Triggered poll at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+                    os.remove(trigger_file)
+                except:
+                    pass
+            
+            # Check if it's time for regular polling or if triggered
+            current_time = time.time()
+            time_since_last_poll = current_time - last_poll_time
+            
+            if trigger_now or time_since_last_poll >= frequency:
+                if not trigger_now:
+                    print(f"\n--- Polling at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+                
+                conn = sqlite3.connect(DB_FILE)
+                poll_sensors(conn)
+                conn.close()
+                
+                last_poll_time = current_time
+                
+            # Sleep for 1 second and check again
+            time.sleep(1)
+                        
         except KeyboardInterrupt:
             print("\n\nPolling stopped by user")
             break
         except Exception as e:
             print(f"Error during polling: {e}")
-            time.sleep(frequency)
+            time.sleep(1)
+
+def single_poll():
+    """Perform a single poll of all sensors"""
+    print(f"\n--- Single poll at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
+    conn = sqlite3.connect(DB_FILE)
+    poll_sensors(conn)
+    conn.close()
+    print("Single poll completed.")
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully"""
@@ -214,6 +253,12 @@ def signal_handler(sig, frame):
 
 def main():
     """Main function"""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Garden Sensors Database Logger')
+    parser.add_argument('--single-poll', action='store_true', 
+                        help='Perform a single poll and exit')
+    args = parser.parse_args()
+    
     print("Garden Sensors Database Logger")
     print("==============================\n")
     
@@ -262,8 +307,12 @@ def main():
     print(f"Found {sensor_count} plants with sensors")
     print(f"Current season: {get_current_season()}")
     
-    # Start continuous polling
-    continuous_polling(frequency)
+    # Check if single poll mode
+    if args.single_poll:
+        single_poll()
+    else:
+        # Start continuous polling
+        continuous_polling(frequency)
 
 if __name__ == "__main__":
     main()

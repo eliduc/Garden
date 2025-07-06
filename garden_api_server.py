@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 import csv
 import io
 import os
+import threading
+import subprocess
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -80,6 +82,75 @@ def health_check():
         return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()}), 200
     except Exception as e:
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
+
+@app.route('/api/trigger-sensor-poll', methods=['POST'])
+def trigger_sensor_poll():
+    """Trigger immediate sensor polling"""
+    try:
+        # Try to create a trigger file that the logger can detect
+        trigger_file = 'poll_trigger.txt'
+        with open(trigger_file, 'w') as f:
+            f.write(str(datetime.now().timestamp()))
+        
+        # Also try to run a single poll if logger is not running
+        # Check if we can run it without interfering with existing process
+        import psutil
+        import sys
+        
+        # Check if garden_db_logger.py is already running
+        logger_running = False
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info.get('cmdline', [])
+                if cmdline and 'garden_db_logger.py' in ' '.join(cmdline):
+                    logger_running = True
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        
+        if not logger_running:
+            # Logger not running, we can run single poll
+            python_exe = sys.executable
+            result = subprocess.run(
+                [python_exe, 'garden_db_logger.py', '--single-poll'],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Sensor polling completed (single poll)',
+                    'timestamp': datetime.now().isoformat()
+                }), 200
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Sensor polling failed',
+                    'error': result.stderr,
+                    'timestamp': datetime.now().isoformat()
+                }), 500
+        else:
+            # Logger is running, trigger file created
+            return jsonify({
+                'status': 'success',
+                'message': 'Sensor poll triggered',
+                'timestamp': datetime.now().isoformat()
+            }), 200
+            
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            'status': 'error',
+            'message': 'Sensor polling timeout',
+            'timestamp': datetime.now().isoformat()
+        }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/api/sensor-data', methods=['GET'])
 def get_sensor_data():

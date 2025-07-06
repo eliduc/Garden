@@ -101,6 +101,17 @@
             transform: none;
         }
         
+        button.refreshing {
+            background-color: #ff9800;
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        
         select {
             padding: 8px 12px;
             font-size: 14px;
@@ -447,6 +458,7 @@
         let refreshInterval = null;
         let plaquePositions = new Map();
         let hintShown = false;
+        let isRefreshing = false;
         
         // Touch handling
         let touchStartTime = 0;
@@ -491,7 +503,7 @@
                 viewMode = e.target.value;
                 render();
             });
-            document.getElementById('refreshBtn').addEventListener('click', () => refreshSensorData());
+            document.getElementById('refreshBtn').addEventListener('click', () => triggerSensorPoll());
             document.getElementById('zoomInBtn').addEventListener('click', () => zoomIn());
             document.getElementById('zoomOutBtn').addEventListener('click', () => zoomOut());
             document.getElementById('zoomResetBtn').addEventListener('click', () => zoomReset());
@@ -580,649 +592,694 @@
             render();
         }
 
-        async function refreshSensorData() {
-            if (!gardenData) return;
-            document.getElementById('statusText').textContent = 'Refreshing...';
+        async function triggerSensorPoll() {
+            if (isRefreshing) return;
+            
+            isRefreshing = true;
+            const refreshBtn = document.getElementById('refreshBtn');
+            refreshBtn.classList.add('refreshing');
+            refreshBtn.disabled = true;
+            document.getElementById('statusText').textContent = 'Polling sensors...';
+            
             try {
-                const response = await fetch(`${API_BASE_URL}/dashboard-data`);
-                if (response.ok) {
-                    const dashboardData = await response.json();
-                    sensorData = dashboardData.sensor_data || {};
-                    plantInfo = dashboardData.plant_info || {};
-                } else { throw new Error('Failed to refresh dashboard data'); }
-            } catch (e) {
-                console.log('Dashboard refresh failed, using fallback');
-                const plantsWithSensors = gardenData.plants.filter(p => p.has_sensor && p.sensor_id);
-                for (const plant of plantsWithSensors) {
-                    try {
-                        const response = await fetch(`${API_BASE_URL}/sensor-data?device_id=${plant.sensor_id}&limit=1`);
-                        if (response.ok) {
-                            const data = await response.json();
-                            if (data && data.length > 0) sensorData[plant.sensor_id] = data[0];
-                        }
-                    } catch (err) { console.error(`Failed to fetch data for sensor ${plant.sensor_id}:`, err); }
-                }
-            }
-            const now = new Date();
-            document.getElementById('statusText').textContent = `Updated: ${now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
-            render();
-        }
-
-        // --- ОБРАБОТЧИКИ СОБЫТИЙ (КЛИКИ, КАСАНИЯ) ---
-
-        function setupCanvasEvents() {
-            // Для кликов и тапов
-            canvas.addEventListener('click', handleCanvasClick, { passive: false });
-            
-            // Для перетаскивания мышью
-            canvas.addEventListener('mousedown', handleCanvasMouseDown, { passive: false });
-            canvas.addEventListener('mousemove', handleCanvasMouseMove, { passive: false });
-            canvas.addEventListener('mouseup', handleCanvasMouseUp, { passive: false });
-            canvas.addEventListener('mouseleave', handleCanvasMouseLeave, { passive: false });
-
-            // Для перетаскивания и масштабирования касанием
-            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-            canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
-
-            // Для масштабирования колесиком мыши
-            canvas.addEventListener('wheel', handleCanvasWheel, { passive: false });
-        }
-
-        function handleCanvasClick(event) {
-            if (isDragging) return;
-
-            const rect = canvas.getBoundingClientRect();
-            const x = event.clientX - rect.left;
-            const y = event.clientY - rect.top;
-            handleItemSelection(x, y);
-        }
-
-        function handleCanvasMouseDown(event) {
-            if (event.button !== 0) return;
-            isMouseDown = true;
-            isDragging = false;
-            dragStartX = event.clientX - offsetX;
-            dragStartY = event.clientY - offsetY;
-            mouseDownX = event.clientX;
-            mouseDownY = event.clientY;
-        }
-
-        function handleCanvasMouseMove(event) {
-            if (!isMouseDown) return;
-
-            if (!isDragging && Math.hypot(event.clientX - mouseDownX, event.clientY - mouseDownY) > 5) {
-                isDragging = true;
-            }
-            
-            if(isDragging) {
-                document.getElementById('canvas-container').classList.add('grabbing');
-                offsetX = event.clientX - dragStartX;
-                offsetY = event.clientY - dragStartY;
-                render();
-            }
-        }
-        
-        function handleCanvasMouseUp(event) {
-            isMouseDown = false;
-            setTimeout(() => { isDragging = false; }, 0); 
-            document.getElementById('canvas-container').classList.remove('grabbing');
-        }
-
-        function handleTouchStart(event) {
-            isMouseDown = true;
-            isDragging = false;
-            touchStartTime = Date.now();
-
-            if (event.touches.length === 1) {
-                const touch = event.touches[0];
-                const rect = canvas.getBoundingClientRect();
-                touchStartPos.x = touch.clientX - rect.left;
-                touchStartPos.y = touch.clientY - rect.top;
-                dragStartX = touch.clientX - offsetX;
-                dragStartY = touch.clientY - offsetY;
-            } else if (event.touches.length === 2) {
-                isDragging = true;
-                const dx = event.touches[0].clientX - event.touches[1].clientX;
-                const dy = event.touches[0].clientY - event.touches[1].clientY;
-                touchStartDistance = Math.sqrt(dx * dx + dy * dy);
-                touchStartZoom = zoomLevel;
-            }
-        }
-
-        function handleTouchEnd(event) {
-            isMouseDown = false;
-            const touchDuration = Date.now() - touchStartTime;
-            if (event.touches.length === 0 && !isDragging && touchDuration < 300) {
-                const now = Date.now();
-                if (now - lastTouchEnd < 300) return;
-                lastTouchEnd = now;
-                handleItemSelection(touchStartPos.x, touchStartPos.y);
-            }
-
-            setTimeout(() => { isDragging = false; }, 0);
-        }
-        
-        function handleItemSelection(x, y) {
-            if (!gardenData) return;
-            let plantTapped = null;
-
-            for (const plant of gardenData.plants) {
-                const isMobile = window.innerWidth < 768;
-                const visualBaseSize = isMobile ? 45 : 55;
-                const pos = transformPoint(plant.position[0], plant.position[1]);
-                const size = visualBaseSize * scale;
-                const touchWidth = 70 * scale;
-                const touchHeight = (visualBaseSize + 30) * scale;
-                const plantCenterX = pos.x + size / 2;
-                const topY = pos.y - (20 * scale);
-
-                if (x >= plantCenterX - touchWidth / 2 && x <= plantCenterX + touchWidth / 2 &&
-                    y >= topY && y <= topY + touchHeight) {
-                    plantTapped = plant;
-                    break;
-                }
-            }
-
-            if (plantTapped) {
-                if (plantTapped.has_sensor) {
-                    selectedPlant = plantTapped;
-                    plantInfoDiv.style.display = 'none';
-                } else {
-                    showPlantInfo(plantTapped);
-                    selectedPlant = null;
-                }
-            } else {
-                selectedPlant = null;
-                plantInfoDiv.style.display = 'none';
-            }
-            render();
-        }
-
-        // --- ЛОГИКА РЕНДЕРИНГА И ОТРИСОВКИ ---
-        
-        function render() {
-            if (!gardenData) return;
-            const canvasWidth = canvas.clientWidth;
-            const canvasHeight = canvas.clientHeight;
-            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-            ctx.fillStyle = '#f5deb3';
-            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-            
-            ctx.save();
-            
-            if (gardenData.boundary && gardenData.boundary.length > 2) {
-                ctx.beginPath();
-                const firstPoint = transformPoint(gardenData.boundary[0][0], gardenData.boundary[0][1]);
-                ctx.moveTo(firstPoint.x, firstPoint.y);
-                for (let i = 1; i < gardenData.boundary.length; i++) {
-                    const point = transformPoint(gardenData.boundary[i][0], gardenData.boundary[i][1]);
-                    ctx.lineTo(point.x, point.y);
-                }
-                ctx.closePath();
-                ctx.fillStyle = '#64c864';
-                ctx.fill();
-                ctx.strokeStyle = '#2e7d32';
-                ctx.lineWidth = Math.max(2, 3 * zoomLevel);
-                ctx.stroke();
-            }
-            
-            for (const img of gardenData.images || []) {
-                const image = imageCache[img.image_path];
-                if (image) {
-                    const pos = transformPoint(img.position[0], img.position[1]);
-                    ctx.drawImage(image, pos.x, pos.y, img.size[0] * scale, img.size[1] * scale);
-                }
-            }
-            
-            plaquePositions.clear();
-            
-            for (const plant of gardenData.plants || []) {
-                if (viewMode === 'sensors' && !plant.has_sensor) continue;
-                
-                const pos = transformPoint(plant.position[0], plant.position[1]);
-                
-                const isMobile = window.innerWidth < 768;
-                const visualBaseSize = isMobile ? 45 : 55;
-                const size = visualBaseSize * scale;
-                
-                let plantImage = (plant.db_id && plantImageCache[plant.db_id]) ||
-                                 (plant.image_path && imageCache[plant.image_path]) ||
-                                 defaultPlantImage;
-                
-                if (plantImage) {
-                    if (hoveredPlant === plant || selectedPlant === plant) {
-                        ctx.save();
-                        ctx.shadowColor = 'rgba(76, 175, 80, 0.8)';
-                        ctx.shadowBlur = 15 * scale;
-                        ctx.drawImage(plantImage, pos.x - size * 0.05, pos.y - size * 0.05, size * 1.1, size * 1.1);
-                        ctx.restore();
-                    } else {
-                        ctx.drawImage(plantImage, pos.x, pos.y, size, size);
-                    }
-                }
-                
-                ctx.save();
-                const fontSize = Math.max(12, 14 * scale);
-                ctx.font = `bold ${fontSize}px Arial`;
-                ctx.textAlign = 'center';
-                ctx.strokeStyle = 'white';
-                ctx.lineWidth = 3;
-                ctx.strokeText(plant.name, pos.x + size / 2, pos.y - 8 * scale);
-                ctx.fillStyle = '#000000';
-                ctx.fillText(plant.name, pos.x + size / 2, pos.y - 8 * scale);
-                ctx.restore();
-                
-                if (plant.has_sensor) {
-                    drawStatusIndicator(plant, pos, size);
-                }
-            }
-            
-            ctx.restore();
-            
-            for (const plant of gardenData.plants || []) {
-                if (plant.has_sensor && plant.sensor_id && (viewMode === 'all' || viewMode === 'sensors')) {
-                    const pos = transformPoint(plant.position[0], plant.position[1]);
-                    drawSensorPlaque(plant, pos);
-                }
-            }
-        }
-        
-        function drawStatusIndicator(plant, pos, plantSize) {
-            const status = getOverallStatus(plant);
-            if (!status) return;
-            const radius = Math.max(4, 6 * scale);
-            const indicatorX = pos.x + plantSize - radius;
-            const indicatorY = pos.y + radius;
-            ctx.beginPath();
-            ctx.arc(indicatorX, indicatorY, radius, 0, 2 * Math.PI, false);
-            ctx.fillStyle = status.color;
-            ctx.fill();
-            ctx.lineWidth = 1.5;
-            ctx.strokeStyle = 'white';
-            ctx.stroke();
-        }
-        
-        function drawSensorPlaque(plant, pos) {
-            let plaque = document.getElementById(`plaque-${plant.sensor_id}`);
-            if (!plaque) {
-                plaque = document.createElement('div');
-                plaque.id = `plaque-${plant.sensor_id}`;
-                plaque.className = 'sensor-plaque';
-                
-                plaque.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    showPlantInfo(plant);
+                // Trigger sensor polling
+                const pollResponse = await fetch(`${API_BASE_URL}/trigger-sensor-poll`, {
+                    method: 'POST'
                 });
-
-                document.getElementById('canvas-container').appendChild(plaque);
-            }
-            
-            const data = sensorData[plant.sensor_id];
-            if (!data) {
-                // Нет данных - датчик еще не опрашивался
-                plaque.innerHTML = `<div style="color: #757575; font-weight: bold;">No data yet</div>
-                                   <div style="font-size: 10px; color: #757575;">Waiting for first reading...</div>`;
-            } else if (data.sensor_state === 0) {
-                // Датчик действительно offline
-                plaque.innerHTML = `<div style="color: #d32f2f; font-weight: bold;">Sensor offline</div>
-                                   <div style="font-size: 10px; color: #999;">Last seen: ${data.date} ${data.time}</div>`;
-            } else {
-                // Датчик online, показываем данные
-                const info = plantInfo[plant.name] || {};
-                const season = getCurrentSeason();
-                const humClass = getHumidityClass(data.humidity, info, season);
-                const tempClass = getTemperatureClass(data.temperature, info, season);
-
-                const humLow = info.humidity_range ? info.humidity_range.low : '-';
-                const humHigh = info.humidity_range ? info.humidity_range.high : '-';
-                const tempLow = info.temperature_range ? info.temperature_range.low : '-';
-                const tempHigh = info.temperature_range ? info.temperature_range.high : '-';
-
-                plaque.innerHTML = `
-                    <div class="hum-row"><strong class="${humClass}">💧:</strong>
-                        <span class="${humClass}">${humLow} / <b>${data.humidity || 'N/A'}</b> / ${humHigh}%</span>
-                    </div>
-                    <div class="temp-row"><strong class="${tempClass}">🌡:</strong>
-                        <span class="${tempClass}">${tempLow} / <b>${data.temperature || 'N/A'}</b> / ${tempHigh}°</span>
-                    </div>
-                    <div class="battery-row"><strong>🔋:</strong>
-                        <span>${data.battery_charge || 'N/A'}%</span>
-                    </div>`;
-            }
-
-            if (plant === selectedPlant) {
-                plaque.classList.add('visible');
-            } else {
-                plaque.classList.remove('visible');
-            }
-            
-            const canvasRect = canvas.getBoundingClientRect();
-            const isMobile = window.innerWidth < 768;
-            const plaqueWidth = isMobile ? 140 : 160;
-            const plaqueHeight = isMobile ? 60 : 70;
-            const plaqueOffset = 10;
-            const optimalPos = calculateOptimalPlaquePosition(
-                pos, (isMobile ? 45 : 55) * scale, plaqueWidth, plaqueHeight, plaqueOffset,
-                canvasRect, plant.sensor_id
-            );
-            plaque.style.left = `${canvasRect.left + optimalPos.x}px`;
-            plaque.style.top = `${canvasRect.top + optimalPos.y}px`;
-        }
-
-        // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-
-        function getOverallStatus(plant) {
-            const data = sensorData[plant.sensor_id];
-            if (!data) {
-                return { level: 4, color: '#757575' }; // Gray - no data
-            }
-            if (data.sensor_state === 0) {
-                return { level: 3, color: '#424242' }; // Dark gray - offline
-            }
-            const info = plantInfo[plant.name] || {};
-            const season = getCurrentSeason();
-            const tempClass = getTemperatureClass(data.temperature, info, season);
-            const humClass = getHumidityClass(data.humidity, info, season);
-            if (tempClass === 'value-red' || humClass === 'value-red') {
-                return { level: 2, color: '#d32f2f' }; // Red
-            }
-            if (tempClass === 'value-yellow' || humClass === 'value-yellow') {
-                return { level: 1, color: '#f57c00' }; // Yellow
-            }
-            return { level: 0, color: '#2e7d32' }; // Green
-        }
-        
-        function getHumidityClass(humidity, info, season) {
-            if (!info || !info.humidity_range) return 'value-green';
-            const low = info.humidity_range.low;
-            const high = info.humidity_range.high;
-            if (humidity < low * 0.8 || humidity > high * 1.2) return 'value-red';
-            if (humidity < low || humidity > high) return 'value-yellow';
-            return 'value-green';
-        }
-        
-        function getTemperatureClass(temp, info, season) {
-            if (!info || !info.temperature_range) return 'value-green';
-            const low = info.temperature_range.low;
-            const high = info.temperature_range.high;
-            if (temp < low * 0.8 || temp > high * 1.2) return 'value-red';
-            if (temp < low || temp > high) return 'value-yellow';
-            return 'value-green';
-        }
-
-        async function showPlantInfo(plant) {
-            const info = plantInfo[plant.name] || {};
-            document.getElementById('plantName').textContent = plant.name;
-            const plantImage = document.getElementById('plantImage');
-            if (plant.db_id) {
-                const photoUrl = `${API_BASE_URL}/plant-photo/${plant.db_id}`;
-                plantImage.src = photoUrl;
-                plantImage.style.display = 'block';
-                plantImage.onerror = () => { plantImage.style.display = 'none'; };
-            } else {
-                plantImage.style.display = 'none';
-            }
-            let details = `<p><strong>Species:</strong> ${plant.species || 'N/A'}</p>`;
-            
-            if(plant.has_sensor) {
-                details += `<p><strong>Sensor Name:</strong> ${plant.sensor_name || 'N/A'}</p>`;
-                details += `<p><strong>Sensor ID:</strong> ${plant.sensor_id || 'N/A'}</p>`;
-                const data = sensorData[plant.sensor_id];
-                if (data) {
-                    details += `<hr style="margin: 12px 0;">`;
-                    details += `<p><strong>Last Reading:</strong></p>`;
-                    details += `<p>🌡 Temperature: <strong>${data.temperature}°C</strong></p>`;
-                    details += `<p>💧 Humidity: <strong>${data.humidity}%</strong></p>`;
-                    details += `<p>🔋 Battery: <strong>${data.battery_charge}%</strong></p>`;
-                }
-            }
-
-            document.getElementById('plantDetails').innerHTML = details;
-            plantInfoDiv.style.display = 'block';
-            plantInfoDiv.style.left = '50%';
-            plantInfoDiv.style.top = '50%';
-            plantInfoDiv.style.transform = 'translate(-50%, -50%)';
-        }
-        
-        function calculateOptimalPlaquePosition(plantPos, plantSize, plaqueWidth, plaqueHeight, offset, canvasRect, sensorId) {
-            const positions = [
-                { x: plantPos.x + plantSize + offset, y: plantPos.y },
-                { x: plantPos.x - plaqueWidth - offset, y: plantPos.y },
-                { x: plantPos.x + plantSize / 2 - plaqueWidth / 2, y: plantPos.y + plantSize + offset },
-                { x: plantPos.x + plantSize / 2 - plaqueWidth / 2, y: plantPos.y - plaqueHeight - offset },
-            ];
-            for (const testPos of positions) {
-                if (testPos.x < 10 || testPos.y < 10 || testPos.x + plaqueWidth > canvasRect.width - 10 || testPos.y + plaqueHeight > canvasRect.height - 10) {
-                    continue;
-                }
-                let hasOverlap = false;
-                for (const [otherId, otherPos] of plaquePositions.entries()) {
-                    if (otherId === sensorId) continue;
-                    if (testPos.x < otherPos.x + plaqueWidth && testPos.x + plaqueWidth > otherPos.x &&
-                        testPos.y < otherPos.y + plaqueHeight && testPos.y + plaqueHeight > otherPos.y) {
-                        hasOverlap = true;
-                        break;
-                    }
-                }
-                if (!hasOverlap) {
-                    plaquePositions.set(sensorId, testPos);
-                    return testPos;
-                }
-            }
-            const fallbackPos = positions[2];
-            plaquePositions.set(sensorId, fallbackPos);
-            return fallbackPos;
-        }
-
-        async function showGardenSelector() {
-            try {
-                const response = await fetch(`${API_BASE_URL}/gardens`);
-                if (!response.ok) throw new Error('Failed to fetch gardens');
-                const gardens = await response.json();
-                if (gardens.length === 0) {
-                    alert('No gardens found in database.');
-                    return;
-                }
-                const gardenList = gardens.map((g, i) => `${i + 1}. ${g.name}`).join('\n');
-                const selection = prompt(`Select a garden:\n${gardenList}\n\nEnter number:`);
-                if (selection) {
-                    const index = parseInt(selection) - 1;
-                    if (index >= 0 && index < gardens.length) {
-                        await loadGardenFromDB(gardens[index].id);
-                    } else {
-                        alert('Invalid selection');
-                    }
+                
+                if (pollResponse.ok) {
+                    // Wait a bit for data to be written to database
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    // Now refresh the display
+                    await refreshSensorData();
+                } else {
+                    const error = await pollResponse.json();
+                    console.error('Failed to trigger sensor poll:', error);
+                    document.getElementById('statusText').textContent = 'Poll failed!';
                 }
             } catch (e) {
-                console.error('Error loading gardens:', e);
-                alert('Error loading gardens from database.');
+                console.error('Error triggering sensor poll:', e);
+                document.getElementById('statusText').textContent = 'Poll error!';
+            } finally {
+                refreshBtn.classList.remove('refreshing');
+                refreshBtn.disabled = false;
+                isRefreshing = false;
+                
+                // Clear error message after 3 seconds
+                setTimeout(() => {
+                    if (document.getElementById('statusText').textContent.includes('failed') || 
+                        document.getElementById('statusText').textContent.includes('error')) {
+                        const now = new Date();
+                        document.getElementById('statusText').textContent = `Updated: ${now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
+                    }
+                }, 3000);
             }
-        }
-        
-        async function loadGardenFromDB(layoutId) {
-            try {
-                loadingDiv.style.display = 'block';
-                const response = await fetch(`${API_BASE_URL}/garden/${layoutId}`);
-                if (!response.ok) throw new Error('Failed to fetch garden data');
-                const data = await response.json();
-                currentLayoutId = layoutId;
-                gardenData = {
-                    boundary: data.boundary,
-                    plants: data.plants.map(p => ({
-                        position: [p.position_x, p.position_y],
-                        name: p.custom_name || p.plant_type_name,
-                        species: p.latin_name || '',
-                        has_sensor: p.has_sensor,
-                        sensor_id: p.sensor_id,
-                        sensor_name: p.sensor_name,
-                        image_path: p.image_path,
-                        unique_id: p.unique_id,
-                        db_id: p.id
-                    })),
-                    images: data.images.map(img => ({
-                        position: [img.position_x, img.position_y],
-                        size: [img.width, img.height],
-                        image_path: img.image_path
-                    }))
-                };
-                await loadPlantPhotos();
-                await loadGardenData();
-                loadingDiv.style.display = 'none';
-            } catch (e) {
-                console.error('Error loading garden from database:', e);
-                loadingDiv.style.display = 'none';
-                alert('Error loading garden from database');
-            }
-        }
-        
-        function loadGardenFile() {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.accept = '.json';
-            input.onchange = async (e) => {
-                const file = e.target.files[0];
-                if (file) {
-                    const text = await file.text();
-                    gardenData = JSON.parse(text);
-                    currentLayoutId = null;
-                    await loadGardenData();
-                }
-            };
-            input.click();
         }
 
-        function resizeCanvas() {
-            const container = document.getElementById('canvas-container');
-            const rect = container.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
-            ctx.scale(dpr, dpr);
-            if (gardenData) {
-                calculateScaleAndOffset();
-                render();
-            }
-        }
-        function calculateScaleAndOffset() {
-            if (!gardenData || !gardenData.boundary || gardenData.boundary.length < 2) return;
-            const boundary = gardenData.boundary;
-            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-            for (const point of boundary) {
-                minX = Math.min(minX, point[0]);
-                maxX = Math.max(maxX, point[0]);
-                minY = Math.min(minY, point[1]);
-                maxY = Math.max(maxY, point[1]);
-            }
-            const gardenWidth = maxX - minX;
-            const gardenHeight = maxY - minY;
-            const margin = (window.innerWidth < 768) ? 30 : 60;
-            const scaleX = (canvas.clientWidth - 2 * margin) / gardenWidth;
-            const scaleY = (canvas.clientHeight - 2 * margin) / gardenHeight;
-            baseScale = Math.min(scaleX, scaleY);
-            scale = baseScale * zoomLevel;
-            const scaledWidth = gardenWidth * baseScale;
-            const scaledHeight = gardenHeight * baseScale;
-            if (zoomLevel === 1) {
-                offsetX = (canvas.clientWidth - scaledWidth) / 2 - minX * baseScale;
-                offsetY = (canvas.clientHeight - scaledHeight) / 2 - minY * baseScale;
-            }
-        }
-        function transformPoint(x, y) { return { x: x * scale + offsetX, y: y * scale + offsetY }; }
-        function zoomIn() { if (zoomLevel < 3) { zoomLevel = Math.min(zoomLevel * 1.2, 3); updateZoom(); } }
-        function zoomOut() { if (zoomLevel > 0.5) { zoomLevel = Math.max(zoomLevel / 1.2, 0.5); updateZoom(); } }
-        function zoomReset() { zoomLevel = 1; calculateScaleAndOffset(); updateZoom(); }
-        function updateZoom() { scale = baseScale * zoomLevel; document.getElementById('zoomLevel').textContent = Math.round(zoomLevel * 100) + '%'; render(); }
-        
-        function handleCanvasMouseLeave() { 
-            if(isMouseDown) {
-                isMouseDown = false; 
-                isDragging = false; 
-                document.getElementById('canvas-container').classList.remove('grabbing'); 
-            }
-            if (hoveredPlant) { 
-                hoveredPlant = null; 
-                render(); 
-            } 
-        }
+		async function refreshSensorData() {
+           if (!gardenData) return;
+           document.getElementById('statusText').textContent = 'Refreshing...';
+           try {
+               const response = await fetch(`${API_BASE_URL}/dashboard-data`);
+               if (response.ok) {
+                   const dashboardData = await response.json();
+                   sensorData = dashboardData.sensor_data || {};
+                   plantInfo = dashboardData.plant_info || {};
+               } else { throw new Error('Failed to refresh dashboard data'); }
+           } catch (e) {
+               console.log('Dashboard refresh failed, using fallback');
+               const plantsWithSensors = gardenData.plants.filter(p => p.has_sensor && p.sensor_id);
+               for (const plant of plantsWithSensors) {
+                   try {
+                       const response = await fetch(`${API_BASE_URL}/sensor-data?device_id=${plant.sensor_id}&limit=1`);
+                       if (response.ok) {
+                           const data = await response.json();
+                           if (data && data.length > 0) sensorData[plant.sensor_id] = data[0];
+                       }
+                   } catch (err) { console.error(`Failed to fetch data for sensor ${plant.sensor_id}:`, err); }
+               }
+           }
+           const now = new Date();
+           document.getElementById('statusText').textContent = `Updated: ${now.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`;
+           render();
+       }
 
-        function handleTouchMove(event) {
-            event.preventDefault();
-            if (!isMouseDown) return;
+       // --- ОБРАБОТЧИКИ СОБЫТИЙ (КЛИКИ, КАСАНИЯ) ---
 
-            if (event.touches.length === 1) {
-                if (!isDragging && Math.hypot(event.touches[0].clientX - (dragStartX+offsetX), event.touches[0].clientY - (dragStartY+offsetY)) > 10) {
-                    isDragging = true;
-                }
-                if(isDragging) {
-                    offsetX = event.touches[0].clientX - dragStartX;
-                    offsetY = event.touches[0].clientY - dragStartY;
-                    render();
-                }
-            } else if (event.touches.length === 2) {
-                isDragging = true;
-                const dx = event.touches[0].clientX - event.touches[1].clientX;
-                const dy = event.touches[0].clientY - event.touches[1].clientY;
-                const distance = Math.sqrt(dx * dx + dy * dy);
-                zoomLevel = Math.max(0.5, Math.min(3, touchStartZoom * distance / touchStartDistance));
-                updateZoom();
-            }
-        }
-        function handleCanvasWheel(event) {
-            event.preventDefault();
-            const delta = event.deltaY > 0 ? 0.9 : 1.1;
-            const newZoom = zoomLevel * delta;
-            if (newZoom >= 0.5 && newZoom <= 3) {
-                const rect = canvas.getBoundingClientRect();
-                const mouseX = event.clientX - rect.left;
-                const mouseY = event.clientY - rect.top;
-                const worldX = (mouseX - offsetX) / scale;
-                const worldY = (mouseY - offsetY) / scale;
-                zoomLevel = newZoom;
-                scale = baseScale * zoomLevel;
-                offsetX = mouseX - worldX * scale;
-                offsetY = mouseY - worldY * scale;
-                updateZoom();
-            }
-        }
-        function getCurrentSeason() { const month = new Date().getMonth() + 1; if (month >= 12 || month <= 2) return 'Winter'; if (month >= 3 && month <= 5) return 'Spring'; if (month >= 6 && month <= 8) return 'Summer'; return 'Autumn'; }
-        
-        function showInfoHint(message) {
-            const hint = document.createElement('div');
-            hint.className = 'info-hint';
-            hint.textContent = message;
-            document.body.appendChild(hint);
-            setTimeout(() => hint.remove(), 5000);
-        }
+       function setupCanvasEvents() {
+           // Для кликов и тапов
+           canvas.addEventListener('click', handleCanvasClick, { passive: false });
+           
+           // Для перетаскивания мышью
+           canvas.addEventListener('mousedown', handleCanvasMouseDown, { passive: false });
+           canvas.addEventListener('mousemove', handleCanvasMouseMove, { passive: false });
+           canvas.addEventListener('mouseup', handleCanvasMouseUp, { passive: false });
+           canvas.addEventListener('mouseleave', handleCanvasMouseLeave, { passive: false });
 
-        function showOrientationHint() { 
-            if (window.innerWidth < window.innerHeight) { 
-                showInfoHint("💡 Rotate device for better view");
-            } 
-        }
+           // Для перетаскивания и масштабирования касанием
+           canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+           canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+           canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
 
-        async function loadPlantPhotos() {
-          const photoPromises = [];
-          for (const plant of gardenData.plants || []) {
-              if (plant.db_id) {
-                  const photoUrl = `${API_BASE_URL}/plant-photo/${plant.db_id}`;
-                  const photoPromise = new Promise((resolve) => {
-                      const img = new Image();
-                      img.onload = () => { plantImageCache[plant.db_id] = img; resolve(); };
-                      img.onerror = () => { plantImageCache[plant.db_id] = defaultPlantImage; resolve(); };
-                      img.src = photoUrl;
-                  });
-                  photoPromises.push(photoPromise);
-              }
-          }
-          await Promise.all(photoPromises);
-        }
+           // Для масштабирования колесиком мыши
+           canvas.addEventListener('wheel', handleCanvasWheel, { passive: false });
+       }
 
-        window.addEventListener('load', init);
-        document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshSensorData(); });
+       function handleCanvasClick(event) {
+           if (isDragging) return;
 
-    </script>
+           const rect = canvas.getBoundingClientRect();
+           const x = event.clientX - rect.left;
+           const y = event.clientY - rect.top;
+           handleItemSelection(x, y);
+       }
+
+       function handleCanvasMouseDown(event) {
+           if (event.button !== 0) return;
+           isMouseDown = true;
+           isDragging = false;
+           dragStartX = event.clientX - offsetX;
+           dragStartY = event.clientY - offsetY;
+           mouseDownX = event.clientX;
+           mouseDownY = event.clientY;
+       }
+
+       function handleCanvasMouseMove(event) {
+           if (!isMouseDown) return;
+
+           if (!isDragging && Math.hypot(event.clientX - mouseDownX, event.clientY - mouseDownY) > 5) {
+               isDragging = true;
+           }
+           
+           if(isDragging) {
+               document.getElementById('canvas-container').classList.add('grabbing');
+               offsetX = event.clientX - dragStartX;
+               offsetY = event.clientY - dragStartY;
+               render();
+           }
+       }
+       
+       function handleCanvasMouseUp(event) {
+           isMouseDown = false;
+           setTimeout(() => { isDragging = false; }, 0); 
+           document.getElementById('canvas-container').classList.remove('grabbing');
+       }
+
+       function handleTouchStart(event) {
+           isMouseDown = true;
+           isDragging = false;
+           touchStartTime = Date.now();
+
+           if (event.touches.length === 1) {
+               const touch = event.touches[0];
+               const rect = canvas.getBoundingClientRect();
+               touchStartPos.x = touch.clientX - rect.left;
+               touchStartPos.y = touch.clientY - rect.top;
+               dragStartX = touch.clientX - offsetX;
+               dragStartY = touch.clientY - offsetY;
+           } else if (event.touches.length === 2) {
+               isDragging = true;
+               const dx = event.touches[0].clientX - event.touches[1].clientX;
+               const dy = event.touches[0].clientY - event.touches[1].clientY;
+               touchStartDistance = Math.sqrt(dx * dx + dy * dy);
+               touchStartZoom = zoomLevel;
+           }
+       }
+
+       function handleTouchEnd(event) {
+           isMouseDown = false;
+           const touchDuration = Date.now() - touchStartTime;
+           if (event.touches.length === 0 && !isDragging && touchDuration < 300) {
+               const now = Date.now();
+               if (now - lastTouchEnd < 300) return;
+               lastTouchEnd = now;
+               handleItemSelection(touchStartPos.x, touchStartPos.y);
+           }
+
+           setTimeout(() => { isDragging = false; }, 0);
+       }
+       
+       function handleItemSelection(x, y) {
+           if (!gardenData) return;
+           let plantTapped = null;
+
+           for (const plant of gardenData.plants) {
+               const isMobile = window.innerWidth < 768;
+               const visualBaseSize = isMobile ? 45 : 55;
+               const pos = transformPoint(plant.position[0], plant.position[1]);
+               const size = visualBaseSize * scale;
+               const touchWidth = 70 * scale;
+               const touchHeight = (visualBaseSize + 30) * scale;
+               const plantCenterX = pos.x + size / 2;
+               const topY = pos.y - (20 * scale);
+
+               if (x >= plantCenterX - touchWidth / 2 && x <= plantCenterX + touchWidth / 2 &&
+                   y >= topY && y <= topY + touchHeight) {
+                   plantTapped = plant;
+                   break;
+               }
+           }
+
+           if (plantTapped) {
+               if (plantTapped.has_sensor) {
+                   selectedPlant = plantTapped;
+                   plantInfoDiv.style.display = 'none';
+               } else {
+                   showPlantInfo(plantTapped);
+                   selectedPlant = null;
+               }
+           } else {
+               selectedPlant = null;
+               plantInfoDiv.style.display = 'none';
+           }
+           render();
+       }
+
+       // --- ЛОГИКА РЕНДЕРИНГА И ОТРИСОВКИ ---
+       
+       function render() {
+           if (!gardenData) return;
+           const canvasWidth = canvas.clientWidth;
+           const canvasHeight = canvas.clientHeight;
+           ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+           ctx.fillStyle = '#f5deb3';
+           ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+           
+           ctx.save();
+           
+           if (gardenData.boundary && gardenData.boundary.length > 2) {
+               ctx.beginPath();
+               const firstPoint = transformPoint(gardenData.boundary[0][0], gardenData.boundary[0][1]);
+               ctx.moveTo(firstPoint.x, firstPoint.y);
+               for (let i = 1; i < gardenData.boundary.length; i++) {
+                   const point = transformPoint(gardenData.boundary[i][0], gardenData.boundary[i][1]);
+                   ctx.lineTo(point.x, point.y);
+               }
+               ctx.closePath();
+               ctx.fillStyle = '#64c864';
+               ctx.fill();
+               ctx.strokeStyle = '#2e7d32';
+               ctx.lineWidth = Math.max(2, 3 * zoomLevel);
+               ctx.stroke();
+           }
+           
+           for (const img of gardenData.images || []) {
+               const image = imageCache[img.image_path];
+               if (image) {
+                   const pos = transformPoint(img.position[0], img.position[1]);
+                   ctx.drawImage(image, pos.x, pos.y, img.size[0] * scale, img.size[1] * scale);
+               }
+           }
+           
+           plaquePositions.clear();
+           
+           for (const plant of gardenData.plants || []) {
+               if (viewMode === 'sensors' && !plant.has_sensor) continue;
+               
+               const pos = transformPoint(plant.position[0], plant.position[1]);
+               
+               const isMobile = window.innerWidth < 768;
+               const visualBaseSize = isMobile ? 45 : 55;
+               const size = visualBaseSize * scale;
+               
+               let plantImage = (plant.db_id && plantImageCache[plant.db_id]) ||
+                                (plant.image_path && imageCache[plant.image_path]) ||
+                                defaultPlantImage;
+               
+               if (plantImage) {
+                   if (hoveredPlant === plant || selectedPlant === plant) {
+                       ctx.save();
+                       ctx.shadowColor = 'rgba(76, 175, 80, 0.8)';
+                       ctx.shadowBlur = 15 * scale;
+                       ctx.drawImage(plantImage, pos.x - size * 0.05, pos.y - size * 0.05, size * 1.1, size * 1.1);
+                       ctx.restore();
+                   } else {
+                       ctx.drawImage(plantImage, pos.x, pos.y, size, size);
+                   }
+               }
+               
+               ctx.save();
+               const fontSize = Math.max(12, 14 * scale);
+               ctx.font = `bold ${fontSize}px Arial`;
+               ctx.textAlign = 'center';
+               ctx.strokeStyle = 'white';
+               ctx.lineWidth = 3;
+               ctx.strokeText(plant.name, pos.x + size / 2, pos.y - 8 * scale);
+               ctx.fillStyle = '#000000';
+               ctx.fillText(plant.name, pos.x + size / 2, pos.y - 8 * scale);
+               ctx.restore();
+               
+               if (plant.has_sensor) {
+                   drawStatusIndicator(plant, pos, size);
+               }
+           }
+           
+           ctx.restore();
+           
+           for (const plant of gardenData.plants || []) {
+               if (plant.has_sensor && plant.sensor_id && (viewMode === 'all' || viewMode === 'sensors')) {
+                   const pos = transformPoint(plant.position[0], plant.position[1]);
+                   drawSensorPlaque(plant, pos);
+               }
+           }
+       }
+       
+       function drawStatusIndicator(plant, pos, plantSize) {
+           const status = getOverallStatus(plant);
+           if (!status) return;
+           const radius = Math.max(4, 6 * scale);
+           const indicatorX = pos.x + plantSize - radius;
+           const indicatorY = pos.y + radius;
+           ctx.beginPath();
+           ctx.arc(indicatorX, indicatorY, radius, 0, 2 * Math.PI, false);
+           ctx.fillStyle = status.color;
+           ctx.fill();
+           ctx.lineWidth = 1.5;
+           ctx.strokeStyle = 'white';
+           ctx.stroke();
+       }
+       
+       function drawSensorPlaque(plant, pos) {
+           let plaque = document.getElementById(`plaque-${plant.sensor_id}`);
+           if (!plaque) {
+               plaque = document.createElement('div');
+               plaque.id = `plaque-${plant.sensor_id}`;
+               plaque.className = 'sensor-plaque';
+               
+               plaque.addEventListener('click', (e) => {
+                   e.stopPropagation();
+                   showPlantInfo(plant);
+               });
+
+               document.getElementById('canvas-container').appendChild(plaque);
+           }
+           
+           const data = sensorData[plant.sensor_id];
+           if (!data) {
+               // Нет данных - датчик еще не опрашивался
+               plaque.innerHTML = `<div style="color: #757575; font-weight: bold;">No data yet</div>
+                                  <div style="font-size: 10px; color: #757575;">Waiting for first reading...</div>`;
+           } else if (data.sensor_state === 0) {
+               // Датчик действительно offline
+               plaque.innerHTML = `<div style="color: #d32f2f; font-weight: bold;">Sensor offline</div>
+                                  <div style="font-size: 10px; color: #999;">Last seen: ${data.date} ${data.time}</div>`;
+           } else {
+               // Датчик online, показываем данные
+               const info = plantInfo[plant.name] || {};
+               const season = getCurrentSeason();
+               const humClass = getHumidityClass(data.humidity, info, season);
+               const tempClass = getTemperatureClass(data.temperature, info, season);
+
+               const humLow = info.humidity_range ? info.humidity_range.low : '-';
+               const humHigh = info.humidity_range ? info.humidity_range.high : '-';
+               const tempLow = info.temperature_range ? info.temperature_range.low : '-';
+               const tempHigh = info.temperature_range ? info.temperature_range.high : '-';
+
+               plaque.innerHTML = `
+                   <div class="hum-row"><strong class="${humClass}">💧:</strong>
+                       <span class="${humClass}">${humLow} / <b>${data.humidity || 'N/A'}</b> / ${humHigh}%</span>
+                   </div>
+                   <div class="temp-row"><strong class="${tempClass}">🌡:</strong>
+                       <span class="${tempClass}">${tempLow} / <b>${data.temperature || 'N/A'}</b> / ${tempHigh}°</span>
+                   </div>
+                   <div class="battery-row"><strong>🔋:</strong>
+                       <span>${data.battery_charge || 'N/A'}%</span>
+                   </div>`;
+           }
+
+           if (plant === selectedPlant) {
+               plaque.classList.add('visible');
+           } else {
+               plaque.classList.remove('visible');
+           }
+           
+           const canvasRect = canvas.getBoundingClientRect();
+           const isMobile = window.innerWidth < 768;
+           const plaqueWidth = isMobile ? 140 : 160;
+           const plaqueHeight = isMobile ? 60 : 70;
+           const plaqueOffset = 10;
+           const optimalPos = calculateOptimalPlaquePosition(
+               pos, (isMobile ? 45 : 55) * scale, plaqueWidth, plaqueHeight, plaqueOffset,
+               canvasRect, plant.sensor_id
+           );
+           plaque.style.left = `${canvasRect.left + optimalPos.x}px`;
+           plaque.style.top = `${canvasRect.top + optimalPos.y}px`;
+       }
+
+       // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+
+       function getOverallStatus(plant) {
+           const data = sensorData[plant.sensor_id];
+           if (!data) {
+               return { level: 4, color: '#757575' }; // Gray - no data
+           }
+           if (data.sensor_state === 0) {
+               return { level: 3, color: '#424242' }; // Dark gray - offline
+           }
+           const info = plantInfo[plant.name] || {};
+           const season = getCurrentSeason();
+           const tempClass = getTemperatureClass(data.temperature, info, season);
+           const humClass = getHumidityClass(data.humidity, info, season);
+           if (tempClass === 'value-red' || humClass === 'value-red') {
+               return { level: 2, color: '#d32f2f' }; // Red
+           }
+           if (tempClass === 'value-yellow' || humClass === 'value-yellow') {
+               return { level: 1, color: '#f57c00' }; // Yellow
+           }
+           return { level: 0, color: '#2e7d32' }; // Green
+       }
+       
+       function getHumidityClass(humidity, info, season) {
+           if (!info || !info.humidity_range) return 'value-green';
+           const low = info.humidity_range.low;
+           const high = info.humidity_range.high;
+           if (humidity < low * 0.8 || humidity > high * 1.2) return 'value-red';
+           if (humidity < low || humidity > high) return 'value-yellow';
+           return 'value-green';
+       }
+       
+       function getTemperatureClass(temp, info, season) {
+           if (!info || !info.temperature_range) return 'value-green';
+           const low = info.temperature_range.low;
+           const high = info.temperature_range.high;
+           if (temp < low * 0.8 || temp > high * 1.2) return 'value-red';
+           if (temp < low || temp > high) return 'value-yellow';
+           return 'value-green';
+       }
+
+       async function showPlantInfo(plant) {
+           const info = plantInfo[plant.name] || {};
+           document.getElementById('plantName').textContent = plant.name;
+           const plantImage = document.getElementById('plantImage');
+           if (plant.db_id) {
+               const photoUrl = `${API_BASE_URL}/plant-photo/${plant.db_id}`;
+               plantImage.src = photoUrl;
+               plantImage.style.display = 'block';
+               plantImage.onerror = () => { plantImage.style.display = 'none'; };
+           } else {
+               plantImage.style.display = 'none';
+           }
+           let details = `<p><strong>Species:</strong> ${plant.species || 'N/A'}</p>`;
+           
+           if(plant.has_sensor) {
+               details += `<p><strong>Sensor Name:</strong> ${plant.sensor_name || 'N/A'}</p>`;
+               details += `<p><strong>Sensor ID:</strong> ${plant.sensor_id || 'N/A'}</p>`;
+               const data = sensorData[plant.sensor_id];
+               if (data) {
+                   details += `<hr style="margin: 12px 0;">`;
+                   details += `<p><strong>Last Reading:</strong></p>`;
+                   details += `<p>🌡 Temperature: <strong>${data.temperature}°C</strong></p>`;
+                   details += `<p>💧 Humidity: <strong>${data.humidity}%</strong></p>`;
+                   details += `<p>🔋 Battery: <strong>${data.battery_charge}%</strong></p>`;
+               }
+           }
+
+           document.getElementById('plantDetails').innerHTML = details;
+           plantInfoDiv.style.display = 'block';
+           plantInfoDiv.style.left = '50%';
+           plantInfoDiv.style.top = '50%';
+           plantInfoDiv.style.transform = 'translate(-50%, -50%)';
+       }
+       
+       function calculateOptimalPlaquePosition(plantPos, plantSize, plaqueWidth, plaqueHeight, offset, canvasRect, sensorId) {
+           const positions = [
+               { x: plantPos.x + plantSize + offset, y: plantPos.y },
+               { x: plantPos.x - plaqueWidth - offset, y: plantPos.y },
+               { x: plantPos.x + plantSize / 2 - plaqueWidth / 2, y: plantPos.y + plantSize + offset },
+               { x: plantPos.x + plantSize / 2 - plaqueWidth / 2, y: plantPos.y - plaqueHeight - offset },
+           ];
+           for (const testPos of positions) {
+               if (testPos.x < 10 || testPos.y < 10 || testPos.x + plaqueWidth > canvasRect.width - 10 || testPos.y + plaqueHeight > canvasRect.height - 10) {
+                   continue;
+               }
+               let hasOverlap = false;
+               for (const [otherId, otherPos] of plaquePositions.entries()) {
+                   if (otherId === sensorId) continue;
+                   if (testPos.x < otherPos.x + plaqueWidth && testPos.x + plaqueWidth > otherPos.x &&
+                       testPos.y < otherPos.y + plaqueHeight && testPos.y + plaqueHeight > otherPos.y) {
+                       hasOverlap = true;
+                       break;
+                   }
+               }
+               if (!hasOverlap) {
+                   plaquePositions.set(sensorId, testPos);
+                   return testPos;
+               }
+           }
+           const fallbackPos = positions[2];
+           plaquePositions.set(sensorId, fallbackPos);
+           return fallbackPos;
+       }
+
+       async function showGardenSelector() {
+           try {
+               const response = await fetch(`${API_BASE_URL}/gardens`);
+               if (!response.ok) throw new Error('Failed to fetch gardens');
+               const gardens = await response.json();
+               if (gardens.length === 0) {
+                   alert('No gardens found in database.');
+                   return;
+               }
+               const gardenList = gardens.map((g, i) => `${i + 1}. ${g.name}`).join('\n');
+               const selection = prompt(`Select a garden:\n${gardenList}\n\nEnter number:`);
+               if (selection) {
+                   const index = parseInt(selection) - 1;
+                   if (index >= 0 && index < gardens.length) {
+                       await loadGardenFromDB(gardens[index].id);
+                   } else {
+                       alert('Invalid selection');
+                   }
+               }
+           } catch (e) {
+               console.error('Error loading gardens:', e);
+               alert('Error loading gardens from database.');
+           }
+       }
+       
+       async function loadGardenFromDB(layoutId) {
+           try {
+               loadingDiv.style.display = 'block';
+               const response = await fetch(`${API_BASE_URL}/garden/${layoutId}`);
+               if (!response.ok) throw new Error('Failed to fetch garden data');
+               const data = await response.json();
+               currentLayoutId = layoutId;
+               gardenData = {
+                   boundary: data.boundary,
+                   plants: data.plants.map(p => ({
+                       position: [p.position_x, p.position_y],
+                       name: p.custom_name || p.plant_type_name,
+                       species: p.latin_name || '',
+                       has_sensor: p.has_sensor,
+                       sensor_id: p.sensor_id,
+                       sensor_name: p.sensor_name,
+                       image_path: p.image_path,
+                       unique_id: p.unique_id,
+                       db_id: p.id
+                   })),
+                   images: data.images.map(img => ({
+                       position: [img.position_x, img.position_y],
+                       size: [img.width, img.height],
+                       image_path: img.image_path
+                   }))
+               };
+               await loadPlantPhotos();
+               await loadGardenData();
+               loadingDiv.style.display = 'none';
+           } catch (e) {
+               console.error('Error loading garden from database:', e);
+               loadingDiv.style.display = 'none';
+               alert('Error loading garden from database');
+           }
+       }
+       
+       function loadGardenFile() {
+           const input = document.createElement('input');
+           input.type = 'file';
+           input.accept = '.json';
+           input.onchange = async (e) => {
+               const file = e.target.files[0];
+               if (file) {
+                   const text = await file.text();
+                   gardenData = JSON.parse(text);
+                   currentLayoutId = null;
+                   await loadGardenData();
+               }
+           };
+           input.click();
+       }
+
+       function resizeCanvas() {
+           const container = document.getElementById('canvas-container');
+           const rect = container.getBoundingClientRect();
+           const dpr = window.devicePixelRatio || 1;
+           canvas.width = rect.width * dpr;
+           canvas.height = rect.height * dpr;
+           canvas.style.width = rect.width + 'px';
+           canvas.style.height = rect.height + 'px';
+           ctx.scale(dpr, dpr);
+           if (gardenData) {
+               calculateScaleAndOffset();
+               render();
+           }
+       }
+       function calculateScaleAndOffset() {
+           if (!gardenData || !gardenData.boundary || gardenData.boundary.length < 2) return;
+           const boundary = gardenData.boundary;
+           let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+           for (const point of boundary) {
+               minX = Math.min(minX, point[0]);
+               maxX = Math.max(maxX, point[0]);
+               minY = Math.min(minY, point[1]);
+               maxY = Math.max(maxY, point[1]);
+           }
+           const gardenWidth = maxX - minX;
+           const gardenHeight = maxY - minY;
+           const margin = (window.innerWidth < 768) ? 30 : 60;
+           const scaleX = (canvas.clientWidth - 2 * margin) / gardenWidth;
+           const scaleY = (canvas.clientHeight - 2 * margin) / gardenHeight;
+           baseScale = Math.min(scaleX, scaleY);
+           scale = baseScale * zoomLevel;
+           const scaledWidth = gardenWidth * baseScale;
+           const scaledHeight = gardenHeight * baseScale;
+           if (zoomLevel === 1) {
+               offsetX = (canvas.clientWidth - scaledWidth) / 2 - minX * baseScale;
+               offsetY = (canvas.clientHeight - scaledHeight) / 2 - minY * baseScale;
+           }
+       }
+       function transformPoint(x, y) { return { x: x * scale + offsetX, y: y * scale + offsetY }; }
+       function zoomIn() { if (zoomLevel < 3) { zoomLevel = Math.min(zoomLevel * 1.2, 3); updateZoom(); } }
+       function zoomOut() { if (zoomLevel > 0.5) { zoomLevel = Math.max(zoomLevel / 1.2, 0.5); updateZoom(); } }
+       function zoomReset() { zoomLevel = 1; calculateScaleAndOffset(); updateZoom(); }
+       function updateZoom() { scale = baseScale * zoomLevel; document.getElementById('zoomLevel').textContent = Math.round(zoomLevel * 100) + '%'; render(); }
+       
+       function handleCanvasMouseLeave() { 
+           if(isMouseDown) {
+               isMouseDown = false; 
+               isDragging = false; 
+               document.getElementById('canvas-container').classList.remove('grabbing'); 
+           }
+           if (hoveredPlant) { 
+               hoveredPlant = null; 
+               render(); 
+           } 
+       }
+
+       function handleTouchMove(event) {
+           event.preventDefault();
+           if (!isMouseDown) return;
+
+           if (event.touches.length === 1) {
+               if (!isDragging && Math.hypot(event.touches[0].clientX - (dragStartX+offsetX), event.touches[0].clientY - (dragStartY+offsetY)) > 10) {
+                   isDragging = true;
+               }
+               if(isDragging) {
+                   offsetX = event.touches[0].clientX - dragStartX;
+                   offsetY = event.touches[0].clientY - dragStartY;
+                   render();
+               }
+           } else if (event.touches.length === 2) {
+               isDragging = true;
+               const dx = event.touches[0].clientX - event.touches[1].clientX;
+               const dy = event.touches[0].clientY - event.touches[1].clientY;
+               const distance = Math.sqrt(dx * dx + dy * dy);
+               zoomLevel = Math.max(0.5, Math.min(3, touchStartZoom * distance / touchStartDistance));
+               updateZoom();
+           }
+       }
+       function handleCanvasWheel(event) {
+           event.preventDefault();
+           const delta = event.deltaY > 0 ? 0.9 : 1.1;
+           const newZoom = zoomLevel * delta;
+           if (newZoom >= 0.5 && newZoom <= 3) {
+               const rect = canvas.getBoundingClientRect();
+               const mouseX = event.clientX - rect.left;
+               const mouseY = event.clientY - rect.top;
+               const worldX = (mouseX - offsetX) / scale;
+               const worldY = (mouseY - offsetY) / scale;
+               zoomLevel = newZoom;
+               scale = baseScale * zoomLevel;
+               offsetX = mouseX - worldX * scale;
+               offsetY = mouseY - worldY * scale;
+               updateZoom();
+           }
+       }
+       function getCurrentSeason() { const month = new Date().getMonth() + 1; if (month >= 12 || month <= 2) return 'Winter'; if (month >= 3 && month <= 5) return 'Spring'; if (month >= 6 && month <= 8) return 'Summer'; return 'Autumn'; }
+       
+       function showInfoHint(message) {
+           const hint = document.createElement('div');
+           hint.className = 'info-hint';
+           hint.textContent = message;
+           document.body.appendChild(hint);
+           setTimeout(() => hint.remove(), 5000);
+       }
+
+       function showOrientationHint() { 
+           if (window.innerWidth < window.innerHeight) { 
+               showInfoHint("💡 Rotate device for better view");
+           } 
+       }
+
+       async function loadPlantPhotos() {
+         const photoPromises = [];
+         for (const plant of gardenData.plants || []) {
+             if (plant.db_id) {
+                 const photoUrl = `${API_BASE_URL}/plant-photo/${plant.db_id}`;
+                 const photoPromise = new Promise((resolve) => {
+                     const img = new Image();
+                     img.onload = () => { plantImageCache[plant.db_id] = img; resolve(); };
+                     img.onerror = () => { plantImageCache[plant.db_id] = defaultPlantImage; resolve(); };
+                     img.src = photoUrl;
+                 });
+                 photoPromises.push(photoPromise);
+             }
+         }
+         await Promise.all(photoPromises);
+       }
+
+       window.addEventListener('load', init);
+       document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshSensorData(); });
+
+   </script>
 </body>
 </html>
