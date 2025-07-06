@@ -11,12 +11,24 @@ import io
 import time
 import threading
 import platform
+import configparser
+import paramiko
+import tempfile
 
 # Initialize pygame
 pygame.init()
 
 # Database configuration
 DB_FILE = 'garden_sensors.db'
+
+# Remote connection variables
+ssh_client = None
+sftp_client = None
+remote_mode = False
+remote_db_path = None
+local_temp_db = None
+db_file_path = DB_FILE
+has_db_changes = False
 
 # Set window size to 90% of screen (like in original)
 screen_info = pygame.display.Info()
@@ -115,14 +127,27 @@ default_plant_image = pygame.transform.scale(default_plant_image, (30, 30))
 sensor_icon = pygame.image.load("sensor.png")
 sensor_icon = pygame.transform.scale(sensor_icon, (15, 15))
 
-# Database functions
+# Forward declarations - define these functions early
+def snap_to_grid(pos):
+    """Snap to nearest grid point"""
+    grid_size = 20
+    grid_x = round(pos[0] / grid_size) * grid_size
+    grid_y = round(pos[1] / grid_size) * grid_size
+    return (grid_x, grid_y)
+
 def get_db_connection():
     """Create a database connection with timeout"""
-    conn = sqlite3.connect(DB_FILE, timeout=30.0)
+    conn = sqlite3.connect(db_file_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     # Enable WAL mode for better concurrency
     conn.execute('PRAGMA journal_mode=WAL')
     return conn
+
+def mark_db_changed():
+    """Mark that database has been changed"""
+    global has_db_changes, garden_modified
+    has_db_changes = True
+    garden_modified = True
 
 def get_plant_types():
     """Get all plant types from database"""
@@ -132,378 +157,6 @@ def get_plant_types():
     types = cursor.fetchall()
     conn.close()
     return types
-
-def get_or_create_plant_type(name, species=""):
-    """Get existing plant type or create new one"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Check if plant type exists
-    cursor.execute('SELECT id FROM plant_types WHERE name = ?', (name,))
-    result = cursor.fetchone()
-    
-    if result:
-        plant_type_id = result[0]
-    else:
-        # Create new plant type
-        cursor.execute('''
-            INSERT INTO plant_types (name, latin_name)
-            VALUES (?, ?)
-        ''', (name, species))
-        plant_type_id = cursor.lastrowid
-        conn.commit()
-    
-    conn.close()
-    return plant_type_id
-
-def compress_photo(photo_data, max_size=(1200, 1200), quality=85):
-    """Compress photo to reduce size and improve performance"""
-    try:
-        img = Image.open(io.BytesIO(photo_data))
-        
-        # Convert RGBA to RGB if necessary
-        if img.mode in ('RGBA', 'LA'):
-            background = Image.new('RGB', img.size, (255, 255, 255))
-            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-            img = background
-        
-        # Resize if larger than max_size
-        img.thumbnail(max_size, Image.Resampling.LANCZOS)
-        
-        # Save compressed
-        output = io.BytesIO()
-        img.save(output, format='JPEG', quality=quality, optimize=True)
-        return output.getvalue()
-    except Exception as e:
-        print(f"Error compressing photo: {e}")
-        return photo_data  # Return original if compression fails
-
-def save_plant_photo(garden_plant_id, photo_data):
-    """Save plant photo to database with proper transaction handling"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        # Start transaction
-        cursor.execute('BEGIN IMMEDIATE')
-        
-        # Check if plant already has a main photo
-        cursor.execute('''
-            SELECT COUNT(*) FROM plant_photos 
-            WHERE garden_plant_id = ? AND photo_type = 'main'
-        ''', (garden_plant_id,))
-        
-        has_main = cursor.fetchone()[0] > 0
-        photo_type = 'additional' if has_main else 'main'
-        
-        # Compress photo
-        compressed_data = compress_photo(photo_data)
-        
-        # Insert photo
-        cursor.execute('''
-            INSERT INTO plant_photos 
-            (garden_plant_id, photo_data, photo_type, description, file_size)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (garden_plant_id, compressed_data, photo_type, 'Plant photo', len(compressed_data)))
-        
-        # Commit transaction
-        cursor.execute('COMMIT')
-        
-        return cursor.lastrowid
-    except Exception as e:
-        cursor.execute('ROLLBACK')
-        print(f"Error saving photo: {e}")
-        return None
-    finally:
-        conn.close()
-
-def get_plant_photo(garden_plant_id):
-    """Get main photo for a plant from database"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT photo_data FROM plant_photos 
-        WHERE garden_plant_id = ? AND photo_type = 'main'
-        LIMIT 1
-    ''', (garden_plant_id,))
-    
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result and result['photo_data']:
-        return result['photo_data']
-    return None
-
-def save_garden_to_db():
-    """Save current garden to database with progress indication"""
-    global current_layout_id, garden_modified
-    
-    # Create progress window
-    progress_window = tk.Tk()
-    progress_window.title("Saving Garden")
-    progress_window.geometry("400x150")
-    
-    # Center the window
-    progress_window.update_idletasks()
-    width = progress_window.winfo_width()
-    height = progress_window.winfo_height()
-    x = (progress_window.winfo_screenwidth() // 2) - (width // 2)
-    y = (progress_window.winfo_screenheight() // 2) - (height // 2)
-    progress_window.geometry(f'+{x}+{y}')
-    
-    # Progress label
-    progress_label = tk.Label(progress_window, text="Preparing to save...", font=("Arial", 12))
-    progress_label.pack(pady=20)
-    
-    # Progress bar
-    progress_bar = ttk.Progressbar(progress_window, length=350, mode='determinate')
-    progress_bar.pack(pady=10)
-    
-    # Status label
-    status_label = tk.Label(progress_window, text="", font=("Arial", 10))
-    status_label.pack(pady=5)
-    
-    # Update window
-    progress_window.update()
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    try:
-        # Start transaction
-        cursor.execute('BEGIN IMMEDIATE')
-        
-        # Calculate total steps
-        total_photo_count = sum(len(plant.get('all_photos', [])) for plant in plants)
-        if any(plant.get('photo_data') and not plant.get('all_photos') for plant in plants):
-            # Count new photos that aren't in all_photos yet
-            total_photo_count += sum(1 for plant in plants if plant.get('photo_data') and not plant.get('all_photos'))
-        
-        total_steps = len(plants) + total_photo_count + len(images) + 3
-        current_step = 0
-        
-        def update_progress(step, text, status=""):
-            progress_bar['value'] = (step / total_steps) * 100
-            progress_label['text'] = text
-            status_label['text'] = status
-            progress_window.update()
-        
-        # Create or update garden layout
-        update_progress(current_step, "Saving garden layout...")
-        
-        if current_layout_id:
-            # Update existing layout
-            cursor.execute('''
-                UPDATE garden_layouts 
-                SET boundary_points = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            ''', (json.dumps(garden_boundary), current_layout_id))
-            
-            # IMPORTANT: Save ALL existing photos before deleting plants
-            update_progress(current_step, "Backing up existing photos...")
-            
-            # Get all existing photos for this garden with full data
-            cursor.execute('''
-                SELECT pp.*, gp.unique_id, gp.custom_name
-                FROM plant_photos pp
-                JOIN garden_plants gp ON pp.garden_plant_id = gp.id
-                WHERE gp.garden_layout_id = ?
-            ''', (current_layout_id,))
-            
-            existing_photos_by_plant = {}
-            for row in cursor.fetchall():
-                key = f"{row['unique_id']}_{row['custom_name']}"  # Use composite key
-                if key not in existing_photos_by_plant:
-                    existing_photos_by_plant[key] = []
-                existing_photos_by_plant[key].append({
-                    'id': row['id'],
-                    'photo_data': row['photo_data'],
-                    'photo_type': row['photo_type'],
-                    'description': row['description'],
-                    'file_size': row['file_size']
-                })
-            
-            # Now safe to delete existing plants
-            cursor.execute('DELETE FROM garden_plants WHERE garden_layout_id = ?', (current_layout_id,))
-            cursor.execute('DELETE FROM garden_images WHERE garden_layout_id = ?', (current_layout_id,))
-        else:
-            # Create new layout
-            cursor.execute('''
-                INSERT INTO garden_layouts (name, boundary_points)
-                VALUES (?, ?)
-            ''', ('My Garden', json.dumps(garden_boundary)))
-            current_layout_id = cursor.lastrowid
-            existing_photos_by_plant = {}
-        
-        current_step += 1
-        
-        # Save plants
-        update_progress(current_step, "Saving plants...", f"0 of {len(plants)}")
-        
-        for i, plant in enumerate(plants):
-            plant_type_id = get_or_create_plant_type(plant['name'], plant.get('species', ''))
-            
-            # Generate unique ID
-            unique_id = f"{plant['name'].upper()}-{plant_type_id:03d}"
-            
-            cursor.execute('''
-                INSERT INTO garden_plants (
-                    unique_id, plant_type_id, position_x, position_y,
-                    custom_name, has_sensor, sensor_id,
-                    sensor_name, garden_layout_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                unique_id,
-                plant_type_id,
-                plant['position'][0],
-                plant['position'][1],
-                plant['name'],
-                plant.get('has_sensor', False),
-                plant.get('sensor_id'),
-                plant.get('sensor_name'),
-                current_layout_id
-            ))
-            
-            garden_plant_id = cursor.lastrowid
-            
-            # Collect photos to save
-            photos_to_save = []
-            
-            # First, check if plant has all_photos list (loaded from DB)
-            if plant.get('all_photos'):
-                for photo_info in plant['all_photos']:
-                    photos_to_save.append({
-                        'photo_data': photo_info['photo_data'],
-                        'photo_type': photo_info['photo_type'],
-                        'description': photo_info.get('description', 'Plant photo')
-                    })
-            
-            # Also check for new photo in photo_data that might not be in all_photos
-            if plant.get('photo_data'):
-                # Check if this photo is already in all_photos
-                photo_already_saved = False
-                if plant.get('all_photos'):
-                    for photo_info in plant['all_photos']:
-                        if photo_info['photo_data'] == plant['photo_data']:
-                            photo_already_saved = True
-                            break
-                
-                if not photo_already_saved:
-                    photos_to_save.append({
-                        'photo_data': plant['photo_data'],
-                        'photo_type': 'main',
-                        'description': 'Plant photo'
-                    })
-            
-            # If no photos in current plant, check existing photos backup
-            if not photos_to_save:
-                key = f"{unique_id}_{plant['name']}"
-                if key in existing_photos_by_plant:
-                    for existing_photo in existing_photos_by_plant[key]:
-                        photos_to_save.append({
-                            'photo_data': existing_photo['photo_data'],
-                            'photo_type': existing_photo['photo_type'],
-                            'description': existing_photo.get('description', 'Plant photo')
-                        })
-            
-            # Save all photos for this plant
-            for j, photo in enumerate(photos_to_save):
-                current_step += 1
-                update_progress(current_step, f"Saving photos for {plant['name']}...", f"Photo {j+1} of {len(photos_to_save)}")
-                
-                try:
-                    # Compress photo if needed
-                    compressed_data = compress_photo(photo['photo_data'])
-                    
-                    # Insert photo
-                    cursor.execute('''
-                        INSERT INTO plant_photos 
-                        (garden_plant_id, photo_data, photo_type, description, file_size)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (
-                        garden_plant_id, 
-                        compressed_data, 
-                        photo['photo_type'], 
-                        photo['description'], 
-                        len(compressed_data)
-                    ))
-                    
-                except Exception as e:
-                    print(f"Error saving photo for plant {plant['name']}: {e}")
-            
-            update_progress(current_step, "Saving plants...", f"{i+1} of {len(plants)}")
-        
-        current_step += 1
-        
-        # Save images
-        update_progress(current_step, "Saving garden images...", f"0 of {len(images)}")
-        
-        for i, img in enumerate(images):
-            cursor.execute('''
-                INSERT INTO garden_images (
-                    garden_layout_id, image_path, position_x, position_y,
-                    width, height
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                current_layout_id,
-                img['image_path'],
-                img['rect'].x,
-                img['rect'].y,
-                img['rect'].width,
-                img['rect'].height
-            ))
-            
-            update_progress(current_step, "Saving garden images...", f"{i+1} of {len(images)}")
-        
-        # Commit all changes
-        update_progress(total_steps - 1, "Finalizing...")
-        cursor.execute('COMMIT')
-        garden_modified = False
-        
-        # Verify photos were saved
-        cursor.execute('''
-            SELECT COUNT(*) as total_photos, 
-                   COUNT(DISTINCT garden_plant_id) as plants_with_photos
-            FROM plant_photos pp
-            JOIN garden_plants gp ON pp.garden_plant_id = gp.id
-            WHERE gp.garden_layout_id = ?
-        ''', (current_layout_id,))
-        
-        result = cursor.fetchone()
-        total_photos = result['total_photos']
-        plants_with_photos = result['plants_with_photos']
-        
-        print(f"Verified {total_photos} photos saved for {plants_with_photos} plants")
-        
-        # Close progress window
-        progress_window.destroy()
-        
-        # Show success message
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showinfo("Success", 
-            f"Garden saved successfully!\n"
-            f"Layout ID: {current_layout_id}\n"
-            f"Total photos saved: {total_photos}\n"
-            f"Plants with photos: {plants_with_photos}")
-        root.destroy()
-        
-        print(f"Garden saved to database (Layout ID: {current_layout_id})")
-        
-    except Exception as e:
-        cursor.execute('ROLLBACK')
-        progress_window.destroy()
-        
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showerror("Error", f"Failed to save garden:\n{str(e)}")
-        root.destroy()
-        
-        print(f"Error saving garden: {e}")
-        raise
-    finally:
-        conn.close()
 
 def load_garden_from_db(layout_id):
     """Load garden from database"""
@@ -522,7 +175,10 @@ def load_garden_from_db(layout_id):
     garden_boundary = json.loads(layout['boundary_points'])
     current_layout_id = layout_id
     
-    # Load plants
+    # Load plants with progress indication for remote mode
+    if remote_mode:
+        draw_progress_screen("Loading plants...", 0)
+    
     cursor.execute('''
         SELECT gp.*, pt.name as plant_type_name, pt.latin_name
         FROM garden_plants gp
@@ -531,7 +187,14 @@ def load_garden_from_db(layout_id):
     ''', (layout_id,))
     
     plants = []
-    for row in cursor.fetchall():
+    plant_rows = cursor.fetchall()
+    total_plants = len(plant_rows)
+    
+    for idx, row in enumerate(plant_rows):
+        if remote_mode and idx % 5 == 0:  # Update progress every 5 plants
+            progress = int(idx * 50 / total_plants)  # 0-50% for plants
+            draw_progress_screen(f"Loading plants... ({idx}/{total_plants})", progress)
+        
         # Get ALL photos for this plant, not just main
         cursor.execute('''
             SELECT photo_data, photo_type, id
@@ -568,7 +231,7 @@ def load_garden_from_db(layout_id):
                     
                     # Convert PIL image to pygame surface
                     image_string = pil_image.convert('RGBA').tobytes()
-                    plant_image = pygame.image.fromstring(image_string, pil_image.size, 'RGBA')
+                    plant_image = pygame.image.frombytes(image_string, pil_image.size, 'RGBA')
                     plant_image = pygame.transform.scale(plant_image, (30, 30))
                 except Exception as e:
                     print(f"Error loading plant photo: {e}")
@@ -589,13 +252,23 @@ def load_garden_from_db(layout_id):
         plants.append(plant)
     
     # Load images
+    if remote_mode:
+        draw_progress_screen("Loading images...", 50)
+    
     cursor.execute('''
         SELECT * FROM garden_images
         WHERE garden_layout_id = ?
     ''', (layout_id,))
     
     images = []
-    for row in cursor.fetchall():
+    image_rows = cursor.fetchall()
+    total_images = len(image_rows)
+    
+    for idx, row in enumerate(image_rows):
+        if remote_mode and idx % 2 == 0:  # Update progress every 2 images
+            progress = int(50 + idx * 50 / max(total_images, 1))  # 50-100% for images
+            draw_progress_screen(f"Loading images... ({idx}/{total_images})", progress)
+        
         image_path = row['image_path']
         if image_path and os.path.exists(image_path):
             try:
@@ -614,9 +287,486 @@ def load_garden_from_db(layout_id):
             except pygame.error:
                 print(f"Error loading image: {image_path}")
     
+    if remote_mode:
+        draw_progress_screen("Loading complete!", 100)
+        time.sleep(0.5)
+    
     conn.close()
     garden_loaded_or_created = True
     return True
+
+# Database connection functions
+def choose_database_mode():
+    """Choose between local and remote database with enhanced remote setup"""
+    global remote_mode, ssh_client, sftp_client, remote_db_path, local_temp_db, db_file_path
+    
+    root = tk.Tk()
+    root.withdraw()
+    
+    dialog = tk.Toplevel()
+    dialog.title("Database Connection Mode")
+    dialog.geometry("500x400")
+    
+    # Center dialog
+    dialog.update_idletasks()
+    x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+    y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+    dialog.geometry(f"+{x}+{y}")
+    
+    dialog.transient()
+    dialog.grab_set()
+    
+    # Main frame
+    main_frame = ttk.Frame(dialog, padding="20")
+    main_frame.pack(fill='both', expand=True)
+    
+    # Title
+    ttk.Label(main_frame, text="Select Database Connection Mode:", 
+             font=("Arial", 14, "bold")).pack(pady=(0, 20))
+    
+    # Mode selection
+    mode_var = tk.StringVar(value="local")
+    
+    ttk.Radiobutton(main_frame, text="Local Database", 
+                   variable=mode_var, value="local",
+                   command=lambda: toggle_remote_fields()).pack(anchor='w', pady=5)
+    ttk.Radiobutton(main_frame, text="Remote Database (SSH)", 
+                   variable=mode_var, value="remote",
+                   command=lambda: toggle_remote_fields()).pack(anchor='w', pady=5)
+    
+    # Remote connection frame
+    remote_frame = ttk.LabelFrame(main_frame, text="Remote Connection Settings", padding="10")
+    remote_frame.pack(fill='x', pady=(20, 0))
+    
+    # Read config for default values
+    config = configparser.ConfigParser()
+    config_file = 'garden.ini'
+    config.read(config_file)
+    
+    default_login = ""
+    default_dir = ""
+    try:
+        default_login = config.get('Remote', 'login')
+        default_dir = config.get('Remote', 'dir')
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        pass
+    
+    # Login field
+    ttk.Label(remote_frame, text="Login (user@host):").grid(row=0, column=0, sticky='w', pady=5)
+    login_var = tk.StringVar(value=default_login)
+    login_entry = ttk.Entry(remote_frame, textvariable=login_var, width=40)
+    login_entry.grid(row=0, column=1, sticky='ew', padx=(10, 0), pady=5)
+    
+    # Directory field
+    ttk.Label(remote_frame, text="Remote directory:").grid(row=1, column=0, sticky='w', pady=5)
+    dir_var = tk.StringVar(value=default_dir)
+    dir_entry = ttk.Entry(remote_frame, textvariable=dir_var, width=40)
+    dir_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0), pady=5)
+    
+    # Password field
+    ttk.Label(remote_frame, text="Password:").grid(row=2, column=0, sticky='w', pady=5)
+    password_var = tk.StringVar()
+    password_entry = ttk.Entry(remote_frame, textvariable=password_var, show='*', width=40)
+    password_entry.grid(row=2, column=1, sticky='ew', padx=(10, 0), pady=5)
+    
+    # Error/Status label
+    status_label = ttk.Label(remote_frame, text="", foreground="red")
+    status_label.grid(row=3, column=0, columnspan=2, pady=10)
+    
+    # Progress bar
+    progress_var = tk.DoubleVar()
+    progress_bar = ttk.Progressbar(remote_frame, variable=progress_var, maximum=100)
+    progress_bar.grid(row=4, column=0, columnspan=2, sticky='ew', pady=10)
+    progress_bar.grid_remove()  # Initially hidden
+    
+    remote_frame.grid_columnconfigure(1, weight=1)
+    
+    def toggle_remote_fields():
+        """Enable/disable remote fields based on mode selection"""
+        if mode_var.get() == "remote":
+            for widget in [login_entry, dir_entry, password_entry]:
+                widget.config(state='normal')
+        else:
+            for widget in [login_entry, dir_entry, password_entry]:
+                widget.config(state='disabled')
+    
+    # Initial state
+    toggle_remote_fields()
+    
+    # Button frame
+    button_frame = ttk.Frame(main_frame)
+    button_frame.pack(pady=(20, 0))
+    
+    result = {'mode': None, 'success': False}
+    attempts = 0
+    max_attempts = 3
+    
+    def test_connection():
+        """Test remote connection and setup database"""
+        nonlocal attempts
+        global ssh_client, sftp_client, remote_db_path, local_temp_db, db_file_path
+        
+        login = login_var.get().strip()
+        remote_dir = dir_var.get().strip()
+        password = password_var.get()
+        
+        if not login or not remote_dir or not password:
+            status_label.config(text="Please fill all fields", foreground="red")
+            return False
+        
+        if '@' not in login:
+            status_label.config(text="Login format: username@hostname", foreground="red")
+            return False
+        
+        username, hostname = login.split('@', 1)
+        attempts += 1
+        
+        status_label.config(text=f"Connecting... (Attempt {attempts}/{max_attempts})", foreground="blue")
+        dialog.update()
+        
+        try:
+            # Create SSH client
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Try to connect
+            ssh_client.connect(hostname, username=username, password=password, compress=True)
+            
+            # Connection successful
+            status_label.config(text="Connected! Setting up database...", foreground="green")
+            progress_bar.grid()
+            progress_var.set(20)
+            dialog.update()
+            
+            # Open SFTP
+            sftp_client = ssh_client.open_sftp()
+            progress_var.set(40)
+            dialog.update()
+            
+            # Check remote database
+            remote_db_path = os.path.join(remote_dir, DB_FILE).replace('\\', '/')
+            
+            try:
+                file_stat = sftp_client.stat(remote_db_path)
+                file_size = file_stat.st_size
+                file_size_mb = file_size / (1024 * 1024)
+                status_label.config(text=f"Found database ({file_size_mb:.1f} MB). Downloading...", foreground="green")
+                progress_var.set(50)
+                dialog.update()
+                
+            except FileNotFoundError:
+                # Create new database
+                status_label.config(text="Creating new database...", foreground="green")
+                progress_var.set(50)
+                dialog.update()
+                
+                temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+                temp_db.close()
+                
+                temp_conn = sqlite3.connect(temp_db.name)
+                temp_conn.close()
+                
+                sftp_client.put(temp_db.name, remote_db_path)
+                os.unlink(temp_db.name)
+                file_size = 0
+            
+            # Download database
+            progress_var.set(60)
+            dialog.update()
+            
+            local_temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+            local_temp_db.close()
+            
+            if file_size > 0:
+                def download_callback(transferred, total):
+                    percent = 60 + (transferred * 30 / total)
+                    progress_var.set(percent)
+                    dialog.update()
+                
+                sftp_client.get(remote_db_path, local_temp_db.name, callback=download_callback)
+            else:
+                sftp_client.get(remote_db_path, local_temp_db.name)
+                progress_var.set(90)
+                dialog.update()
+            
+            db_file_path = local_temp_db.name
+            
+            # Save settings to config
+            if not config.has_section('Remote'):
+                config.add_section('Remote')
+            config.set('Remote', 'login', login)
+            config.set('Remote', 'dir', remote_dir)
+            
+            with open(config_file, 'w') as f:
+                config.write(f)
+            
+            progress_var.set(100)
+            status_label.config(text="Setup complete!", foreground="green")
+            dialog.update()
+            
+            time.sleep(1)
+            return True
+            
+        except paramiko.AuthenticationException:
+            if ssh_client:
+                ssh_client.close()
+                ssh_client = None
+            
+            if attempts >= max_attempts:
+                status_label.config(text=f"Authentication failed after {max_attempts} attempts", foreground="red")
+                return False
+            else:
+                status_label.config(text=f"Invalid password. {max_attempts - attempts} attempts remaining", foreground="red")
+                password_var.set("")  # Clear password
+                return False
+                
+        except Exception as e:
+            if ssh_client:
+                ssh_client.close()
+                ssh_client = None
+            status_label.config(text=f"Connection error: {str(e)}", foreground="red")
+            return False
+    
+    def on_ok():
+        if mode_var.get() == "local":
+            result['mode'] = 'local'
+            result['success'] = True
+            dialog.destroy()
+        else:
+            # Test remote connection
+            if test_connection():
+                result['mode'] = 'remote'
+                result['success'] = True
+                dialog.destroy()
+    
+    def on_cancel():
+        dialog.destroy()
+        pygame.quit()
+        sys.exit()
+    
+    ok_button = ttk.Button(button_frame, text="OK", command=on_ok)
+    ok_button.pack(side='left', padx=5)
+    ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side='left', padx=5)
+    
+    # Bind Enter key to test connection when in remote mode
+    def on_enter(event):
+        if mode_var.get() == "remote":
+            on_ok()
+    
+    dialog.bind('<Return>', on_enter)
+    password_entry.bind('<Return>', on_enter)
+    
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    dialog.wait_window()
+    
+    try:
+        root.destroy()
+    except:
+        pass
+    
+    if result['success']:
+        if result['mode'] == "remote":
+            remote_mode = True
+            pygame.display.set_caption(f"Garden Designer - Remote: {login_var.get()}")
+        else:
+            remote_mode = False
+            db_file_path = DB_FILE
+
+def draw_progress_screen(text, progress=0):
+    """Draw a nice progress screen with loading bar"""
+    # Background gradient
+    for y in range(window_height):
+        color_value = int(100 + (155 * y / window_height))
+        color = (color_value, color_value, color_value)
+        pygame.draw.line(window, color, (0, y), (window_width, y))
+    
+    # Center box
+    box_width = 500
+    box_height = 200
+    box_x = (window_width - box_width) // 2
+    box_y = (window_height - box_height) // 2
+    
+    # Draw box with shadow
+    shadow_offset = 5
+    pygame.draw.rect(window, (50, 50, 50), 
+                    (box_x + shadow_offset, box_y + shadow_offset, box_width, box_height))
+    pygame.draw.rect(window, (255, 255, 255), 
+                    (box_x, box_y, box_width, box_height))
+    pygame.draw.rect(window, (100, 100, 100), 
+                    (box_x, box_y, box_width, box_height), 3)
+    
+    # Title
+    title_font = pygame.font.Font(None, 36)
+    title_text = title_font.render("Garden Designer", True, (33, 150, 243))
+    title_rect = title_text.get_rect(centerx=window_width//2, y=box_y + 20)
+    window.blit(title_text, title_rect)
+    
+    # Status text
+    status_font = pygame.font.Font(None, 24)
+    status_text = status_font.render(text, True, (0, 0, 0))
+    status_rect = status_text.get_rect(centerx=window_width//2, y=box_y + 80)
+    window.blit(status_text, status_rect)
+    
+    # Progress bar
+    bar_width = 400
+    bar_height = 20
+    bar_x = (window_width - bar_width) // 2
+    bar_y = box_y + 120
+    
+    # Progress bar background
+    pygame.draw.rect(window, (200, 200, 200), 
+                    (bar_x, bar_y, bar_width, bar_height))
+    pygame.draw.rect(window, (100, 100, 100), 
+                    (bar_x, bar_y, bar_width, bar_height), 2)
+    
+    # Progress bar fill
+    if progress > 0:
+        fill_width = int(bar_width * progress / 100)
+        pygame.draw.rect(window, (33, 150, 243), 
+                        (bar_x, bar_y, fill_width, bar_height))
+    
+    # Progress percentage
+    percent_text = status_font.render(f"{progress}%", True, (100, 100, 100))
+    percent_rect = percent_text.get_rect(centerx=window_width//2, y=bar_y + 30)
+    window.blit(percent_text, percent_rect)
+    
+    pygame.display.flip()
+
+def cleanup_ssh():
+    """Clean up SSH connection and temp files"""
+    global ssh_client, sftp_client, local_temp_db
+    
+    if sftp_client:
+        try:
+            sftp_client.close()
+        except:
+            pass
+    
+    if ssh_client:
+        try:
+            ssh_client.close()
+        except:
+            pass
+    
+    if local_temp_db and os.path.exists(local_temp_db.name):
+        try:
+            os.unlink(local_temp_db.name)
+        except:
+            pass
+
+def sync_remote_database():
+    """Sync local temp database with remote"""
+    global sftp_client, local_temp_db, remote_db_path, has_db_changes
+    
+    if not remote_mode or not sftp_client:
+        return
+    
+    try:
+        # Show syncing progress
+        draw_progress_screen("Preparing to sync...", 10)
+        
+        # Get file size for progress
+        file_size = os.path.getsize(local_temp_db.name)
+        
+        # Upload with progress callback
+        uploaded = [0]
+        
+        def upload_callback(transferred, total):
+            uploaded[0] = transferred
+            progress = int(10 + (transferred * 80 / total))  # 10-90%
+            draw_progress_screen(f"Uploading database... ({transferred//(1024*1024)} MB)", progress)
+        
+        # Upload temp file to remote
+        sftp_client.put(local_temp_db.name, remote_db_path, callback=upload_callback)
+        
+        draw_progress_screen("Sync complete!", 100)
+        time.sleep(0.5)
+        
+        has_db_changes = False
+        
+        # Show success message
+        if platform.system() == 'Linux' and 'arm' in platform.machine():
+            show_message_pygame("Success", "Database synced successfully")
+        else:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo("Success", "Database synced with remote server")
+            root.destroy()
+            
+    except Exception as e:
+        if platform.system() == 'Linux' and 'arm' in platform.machine():
+            show_message_pygame("Error", f"Sync failed: {str(e)}")
+        else:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Sync Error", f"Failed to sync database: {str(e)}")
+            root.destroy()
+
+# Объявляем функцию show_message_pygame раньше
+def show_message_pygame(title, message):
+    """Show simple message dialog using pygame"""
+    screen_backup = window.copy()
+    
+    # Dialog settings
+    dialog_width = 400
+    dialog_height = 200
+    dialog_x = (window_width - dialog_width) // 2
+    dialog_y = (window_height - dialog_height) // 2
+    
+    bg_color = (240, 240, 240)
+    text_color = (0, 0, 0)
+    button_color = (33, 150, 243)
+    
+    # Fonts
+    title_font = pygame.font.Font(None, 28)
+    msg_font = pygame.font.Font(None, 22)
+    
+    running = True
+    clock = pygame.time.Clock()
+    
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN or event.key == pygame.K_ESCAPE:
+                    running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # Check if clicked on OK button
+                ok_button = pygame.Rect(dialog_x + dialog_width // 2 - 40, dialog_y + dialog_height - 50, 80, 30)
+                if ok_button.collidepoint(event.pos):
+                    running = False
+        
+        # Draw
+        window.blit(screen_backup, (0, 0))
+        
+        # Dialog
+        pygame.draw.rect(window, bg_color, (dialog_x, dialog_y, dialog_width, dialog_height))
+        pygame.draw.rect(window, text_color, (dialog_x, dialog_y, dialog_width, dialog_height), 2)
+        
+        # Title
+        title_text = title_font.render(title, True, text_color)
+        title_rect = title_text.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + 20)
+        window.blit(title_text, title_rect)
+        
+        # Message
+        msg_text = msg_font.render(message, True, text_color)
+        msg_rect = msg_text.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + 80)
+        window.blit(msg_text, msg_rect)
+        
+        # OK button
+        ok_button = pygame.Rect(dialog_x + dialog_width // 2 - 40, dialog_y + dialog_height - 50, 80, 30)
+        pygame.draw.rect(window, button_color, ok_button, border_radius=5)
+        ok_text = msg_font.render("OK", True, (255, 255, 255))
+        ok_rect = ok_text.get_rect(center=ok_button.center)
+        window.blit(ok_text, ok_rect)
+        
+        pygame.display.flip()
+        clock.tick(30)
+    
+    window.blit(screen_backup, (0, 0))
+    pygame.display.flip()
+
+# Initialize database connection mode at startup
+choose_database_mode()
 
 # Function to manage plant thresholds
 def manage_plant_thresholds(plant_type_id, plant_name):
@@ -711,6 +861,7 @@ def manage_plant_thresholds(plant_type_id, plant_name):
                     ))
                 
                 conn.commit()
+                mark_db_changed()
                 messagebox.showinfo("Success", "Thresholds saved successfully!")
                 threshold_window.destroy()
                 
@@ -777,30 +928,57 @@ def manage_plant_thresholds(plant_type_id, plant_name):
     create_threshold_window()
 
 def manage_plant_photos(plant):
-    """Manage multiple photos for a plant"""
+    """Manage multiple photos for a plant with preview functionality"""
     
     def create_photo_window():
         photo_window = tk.Toplevel()
         photo_window.title(f"Photos for {plant['name']}")
-        photo_window.geometry("600x500")
+        photo_window.geometry("800x600")  # Увеличиваем размер окна
         
         # Main frame
         main_frame = tk.Frame(photo_window, padx=20, pady=20)
         main_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Photo list
-        tk.Label(main_frame, text="Plant Photos:", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        # Create horizontal layout with photo list on left and preview on right
+        content_frame = tk.Frame(main_frame)
+        content_frame.pack(fill=tk.BOTH, expand=True)
         
-        # Listbox with scrollbar
-        list_frame = tk.Frame(main_frame)
+        # Left panel for photo list
+        left_panel = tk.Frame(content_frame)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=False)
+        
+        # Right panel for preview
+        right_panel = tk.Frame(content_frame, relief=tk.SUNKEN, bd=2)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        
+        tk.Label(left_panel, text="Plant Photos:", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        
+        # Listbox with scrollbar for photo list
+        list_frame = tk.Frame(left_panel)
         list_frame.pack(fill=tk.BOTH, expand=True)
         
         scrollbar = tk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        photo_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
+        photo_listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, width=30)
         photo_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=photo_listbox.yview)
+        
+        # Preview area
+        tk.Label(right_panel, text="Photo Preview:", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        
+        # Canvas for photo preview with scrollbars
+        preview_frame = tk.Frame(right_panel)
+        preview_frame.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = tk.Canvas(preview_frame, bg='white', relief=tk.SUNKEN, bd=1)
+        h_scrollbar = tk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=canvas.xview)
+        v_scrollbar = tk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(xscrollcommand=h_scrollbar.set, yscrollcommand=v_scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        v_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         
         # Load current photos
         current_photos = plant.get('all_photos', [])
@@ -813,11 +991,79 @@ def manage_plant_photos(plant):
             }]
             plant['all_photos'] = current_photos
         
-        # Populate listbox
-        for i, photo in enumerate(current_photos):
-            photo_listbox.insert(tk.END, f"{i+1}. {photo['photo_type']} - {len(photo['photo_data'])} bytes")
+        # Store preview images to prevent garbage collection
+        preview_images = []
         
-        # Buttons
+        def show_photo_preview(photo_data):
+            """Display photo in preview area"""
+            try:
+                # Clear canvas
+                canvas.delete("all")
+                
+                if photo_data:
+                    # Load image from blob
+                    image_stream = io.BytesIO(photo_data)
+                    pil_image = Image.open(image_stream)
+                    
+                    # Calculate preview size (max 400x400 while maintaining aspect ratio)
+                    max_size = 400
+                    img_width, img_height = pil_image.size
+                    
+                    if img_width > max_size or img_height > max_size:
+                        ratio = min(max_size / img_width, max_size / img_height)
+                        new_width = int(img_width * ratio)
+                        new_height = int(img_height * ratio)
+                        pil_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    
+                    # Convert to PhotoImage
+                    photo_image = ImageTk.PhotoImage(pil_image)
+                    preview_images.append(photo_image)  # Keep reference
+                    
+                    # Add image to canvas
+                    canvas.create_image(0, 0, anchor=tk.NW, image=photo_image)
+                    
+                    # Update scroll region
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                else:
+                    # Show "No preview available" text
+                    canvas.create_text(200, 200, text="No preview available", 
+                                     font=("Arial", 16), fill="gray", anchor=tk.CENTER)
+                    
+            except Exception as e:
+                print(f"Error showing preview: {e}")
+                canvas.delete("all")
+                canvas.create_text(200, 200, text="Error loading preview", 
+                                 font=("Arial", 16), fill="red", anchor=tk.CENTER)
+        
+        def on_photo_select(event):
+            """Handle photo selection from listbox"""
+            selection = photo_listbox.curselection()
+            if selection:
+                index = selection[0]
+                if index < len(current_photos):
+                    photo_data = current_photos[index]['photo_data']
+                    show_photo_preview(photo_data)
+        
+        # Bind selection event
+        photo_listbox.bind('<<ListboxSelect>>', on_photo_select)
+        
+        # Populate listbox
+        def refresh_photo_list():
+            photo_listbox.delete(0, tk.END)
+            preview_images.clear()  # Clear old images
+            for i, photo in enumerate(current_photos):
+                photo_type = photo.get('photo_type', 'unknown')
+                size_text = f"{len(photo['photo_data'])} bytes" if photo.get('photo_data') else "No data"
+                photo_listbox.insert(tk.END, f"{i+1}. {photo_type} - {size_text}")
+        
+        refresh_photo_list()
+        
+        # Show first photo by default if available
+        if current_photos:
+            photo_listbox.selection_set(0)
+            show_photo_preview(current_photos[0]['photo_data'])
+        
+        # Buttons frame at bottom
         button_frame = tk.Frame(main_frame)
         button_frame.pack(pady=(10, 0))
         
@@ -841,8 +1087,11 @@ def manage_plant_photos(plant):
                         'description': 'Plant photo'
                     })
                     
-                    # Update listbox
-                    photo_listbox.insert(tk.END, f"{len(current_photos)}. {photo_type} - {len(photo_data)} bytes")
+                    # Refresh list and show new photo
+                    refresh_photo_list()
+                    photo_listbox.selection_clear(0, tk.END)
+                    photo_listbox.selection_set(len(current_photos) - 1)
+                    show_photo_preview(photo_data)
                     
                     # Update plant's main photo if this is the first/main photo
                     if photo_type == 'main':
@@ -852,13 +1101,14 @@ def manage_plant_photos(plant):
                             image_stream = io.BytesIO(photo_data)
                             pil_image = Image.open(image_stream)
                             image_string = pil_image.convert('RGBA').tobytes()
-                            plant_image = pygame.image.fromstring(image_string, pil_image.size, 'RGBA')
+                            plant_image = pygame.image.frombytes(image_string, pil_image.size, 'RGBA')
                             plant['image'] = pygame.transform.scale(plant_image, (30, 30))
                         except Exception as e:
                             print(f"Error updating plant image: {e}")
                     
                     global garden_modified
                     garden_modified = True
+                    mark_db_changed()
                     
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to add photo: {e}")
@@ -869,29 +1119,43 @@ def manage_plant_photos(plant):
                 index = selection[0]
                 if messagebox.askyesno("Delete Photo", "Are you sure you want to delete this photo?"):
                     removed = current_photos.pop(index)
-                    photo_listbox.delete(index)
                     
                     # If deleted main photo, promote next photo
                     if removed['photo_type'] == 'main' and current_photos:
                         current_photos[0]['photo_type'] = 'main'
                         plant['photo_data'] = current_photos[0]['photo_data']
-                        # Update display
-                        photo_listbox.delete(0)
-                        photo_listbox.insert(0, f"1. main - {len(current_photos[0]['photo_data'])} bytes")
+                        # Update plant image
+                        try:
+                            image_stream = io.BytesIO(current_photos[0]['photo_data'])
+                            pil_image = Image.open(image_stream)
+                            image_string = pil_image.convert('RGBA').tobytes()
+                            plant_image = pygame.image.frombytes(image_string, pil_image.size, 'RGBA')
+                            plant['image'] = pygame.transform.scale(plant_image, (30, 30))
+                        except Exception as e:
+                            print(f"Error updating plant image: {e}")
                     elif not current_photos:
                         plant['photo_data'] = None
                         plant['image'] = default_plant_image
                     
-                    # Re-number items
-                    for i in range(photo_listbox.size()):
-                        item_text = photo_listbox.get(i)
-                        parts = item_text.split('. ', 1)
-                        if len(parts) > 1:
-                            photo_listbox.delete(i)
-                            photo_listbox.insert(i, f"{i+1}. {parts[1]}")
+                    # Refresh list
+                    refresh_photo_list()
+                    
+                    # Show next photo or clear preview
+                    if current_photos:
+                        if index < len(current_photos):
+                            photo_listbox.selection_set(index)
+                            show_photo_preview(current_photos[index]['photo_data'])
+                        elif len(current_photos) > 0:
+                            photo_listbox.selection_set(len(current_photos) - 1)
+                            show_photo_preview(current_photos[-1]['photo_data'])
+                    else:
+                        canvas.delete("all")
+                        canvas.create_text(200, 200, text="No photos available", 
+                                         font=("Arial", 16), fill="gray", anchor=tk.CENTER)
                     
                     global garden_modified
                     garden_modified = True
+                    mark_db_changed()
         
         def set_as_main():
             selection = photo_listbox.curselection()
@@ -909,18 +1173,18 @@ def manage_plant_photos(plant):
                     image_stream = io.BytesIO(current_photos[index]['photo_data'])
                     pil_image = Image.open(image_stream)
                     image_string = pil_image.convert('RGBA').tobytes()
-                    plant_image = pygame.image.fromstring(image_string, pil_image.size, 'RGBA')
+                    plant_image = pygame.image.frombytes(image_string, pil_image.size, 'RGBA')
                     plant['image'] = pygame.transform.scale(plant_image, (30, 30))
                 except Exception as e:
                     print(f"Error updating plant image: {e}")
                 
-                # Update listbox
-                photo_listbox.delete(0, tk.END)
-                for i, photo in enumerate(current_photos):
-                    photo_listbox.insert(tk.END, f"{i+1}. {photo['photo_type']} - {len(photo['photo_data'])} bytes")
+                # Refresh list
+                refresh_photo_list()
+                photo_listbox.selection_set(index)
                 
                 global garden_modified
                 garden_modified = True
+                mark_db_changed()
         
         tk.Button(button_frame, text="Add Photo", command=add_photo).pack(side=tk.LEFT, padx=5)
         tk.Button(button_frame, text="Delete Photo", command=delete_photo).pack(side=tk.LEFT, padx=5)
@@ -1242,377 +1506,311 @@ def get_plant_details_pygame(current_name="", current_species="", current_photo_
     species_rect = pygame.Rect(dialog_x + 120, dialog_y + 120, 350, 30)
     sensor_id_rect = pygame.Rect(dialog_x + 120, dialog_y + 220, 350, 30)
     sensor_name_rect = pygame.Rect(dialog_x + 120, dialog_y + 270, 350, 30)
-    
+   
     running = True
     result_action = 'canceled'
-    
+   
     while running:
-        # Handle events
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-                
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                    
-                elif event.key == pygame.K_TAB:
-                    # Cycle through fields
-                    if active_field == 'species':
-                        active_field = 'sensor_id' if has_sensor else None
-                    elif active_field == 'sensor_id':
-                        active_field = 'sensor_name'
-                    elif active_field == 'sensor_name':
-                        active_field = 'species'
-                    else:
-                        active_field = 'species'
-                        
-                elif active_field:
-                    if event.key == pygame.K_BACKSPACE:
-                        if active_field == 'species':
-                            species = species[:-1]
-                        elif active_field == 'sensor_id':
-                            sensor_id = sensor_id[:-1]
-                        elif active_field == 'sensor_name':
-                            sensor_name = sensor_name[:-1]
-                    elif event.unicode:
-                        if active_field == 'species':
-                            species += event.unicode
-                        elif active_field == 'sensor_id' and len(sensor_id) < 22:
-                            sensor_id += event.unicode
-                        elif active_field == 'sensor_name':
-                            sensor_name += event.unicode
-                            
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                mouse_pos = event.pos
-                
-                # Check buttons
-                if save_button.collidepoint(mouse_pos):
-                    if name:  # Must have a plant name
-                        result_action = 'saved'
-                        running = False
-                elif cancel_button.collidepoint(mouse_pos):
-                    running = False
-                elif delete_button.collidepoint(mouse_pos):
-                    result_action = 'deleted'
-                    running = False
-                    
-                # Check input fields
-                elif species_rect.collidepoint(mouse_pos):
-                    active_field = 'species'
-                elif sensor_id_rect.collidepoint(mouse_pos) and has_sensor:
-                    active_field = 'sensor_id'
-                elif sensor_name_rect.collidepoint(mouse_pos) and has_sensor:
-                    active_field = 'sensor_name'
-                else:
-                    active_field = None
-                    
-                # Check sensor checkbox area
-                sensor_checkbox_rect = pygame.Rect(dialog_x + 20, dialog_y + 180, 200, 30)
-                if sensor_checkbox_rect.collidepoint(mouse_pos):
-                    has_sensor = not has_sensor
-                    if not has_sensor:
-                        active_field = None
-                        
-                # Check plant type dropdown area
-                plant_dropdown_rect = pygame.Rect(dialog_x + 120, dialog_y + 70, 350, 30)
-                if plant_dropdown_rect.collidepoint(mouse_pos):
-                    # Simple cycling through plant types
-                    selected_plant_index = (selected_plant_index + 1) % len(plant_names)
-                    name = plant_names[selected_plant_index]
-                    # Update species
-                    for pt in plant_types:
-                        if pt['name'] == name:
-                            species = pt['latin_name'] or ''
-                            break
-        
-        # Update cursor blink
-        cursor_timer += 1
-        if cursor_timer >= 30:
-            cursor_visible = not cursor_visible
-            cursor_timer = 0
-        
-        # Draw
-        window.blit(screen_backup, (0, 0))
-        
-        # Draw dialog
-        pygame.draw.rect(window, bg_color, (dialog_x, dialog_y, dialog_width, dialog_height))
-        pygame.draw.rect(window, text_color, (dialog_x, dialog_y, dialog_width, dialog_height), 2)
-        
-        # Title
-        title_text = title_font.render("Plant Details", True, text_color)
-        title_rect = title_text.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + 20)
-        window.blit(title_text, title_rect)
-        
-        # Plant type
-        label = label_font.render("Plant Type:", True, text_color)
-        window.blit(label, (dialog_x + 20, dialog_y + 75))
-        pygame.draw.rect(window, input_bg_color, (dialog_x + 120, dialog_y + 70, 350, 30))
-        pygame.draw.rect(window, text_color, (dialog_x + 120, dialog_y + 70, 350, 30), 1)
-        text = input_font.render(name, True, text_color)
-        window.blit(text, (dialog_x + 125, dialog_y + 75))
-        
-        # Species
-        label = label_font.render("Species:", True, text_color)
-        window.blit(label, (dialog_x + 20, dialog_y + 125))
-        pygame.draw.rect(window, input_bg_color, species_rect)
-        pygame.draw.rect(window, selected_color if active_field == 'species' else text_color, species_rect, 2)
-        text = input_font.render(species, True, text_color)
-        window.blit(text, (species_rect.x + 5, species_rect.y + 5))
-        if active_field == 'species' and cursor_visible:
-            cursor_x = species_rect.x + 5 + text.get_width()
-            pygame.draw.line(window, text_color, (cursor_x, species_rect.y + 5), (cursor_x, species_rect.y + 25), 2)
-        
-        # Sensor checkbox
-        checkbox_rect = pygame.Rect(dialog_x + 20, dialog_y + 180, 20, 20)
-        pygame.draw.rect(window, input_bg_color, checkbox_rect)
-        pygame.draw.rect(window, text_color, checkbox_rect, 2)
-        if has_sensor:
-            pygame.draw.line(window, text_color, (checkbox_rect.x + 4, checkbox_rect.y + 10), 
-                           (checkbox_rect.x + 8, checkbox_rect.y + 14), 2)
-            pygame.draw.line(window, text_color, (checkbox_rect.x + 8, checkbox_rect.y + 14), 
-                           (checkbox_rect.x + 16, checkbox_rect.y + 6), 2)
-        label = label_font.render("Add Sensor", True, text_color)
-        window.blit(label, (dialog_x + 50, dialog_y + 180))
-        
-        # Sensor fields (if enabled)
-        if has_sensor:
-            # Sensor ID
-            label = label_font.render("Sensor ID:", True, text_color)
-            window.blit(label, (dialog_x + 20, dialog_y + 225))
-            pygame.draw.rect(window, input_bg_color, sensor_id_rect)
-            pygame.draw.rect(window, selected_color if active_field == 'sensor_id' else text_color, sensor_id_rect, 2)
-            text = input_font.render(sensor_id, True, text_color)
-            window.blit(text, (sensor_id_rect.x + 5, sensor_id_rect.y + 5))
-            if active_field == 'sensor_id' and cursor_visible:
-                cursor_x = sensor_id_rect.x + 5 + text.get_width()
-                pygame.draw.line(window, text_color, (cursor_x, sensor_id_rect.y + 5), (cursor_x, sensor_id_rect.y + 25), 2)
-            
-            # Sensor Name
-            label = label_font.render("Sensor Name:", True, text_color)
-            window.blit(label, (dialog_x + 20, dialog_y + 275))
-            pygame.draw.rect(window, input_bg_color, sensor_name_rect)
-            pygame.draw.rect(window, selected_color if active_field == 'sensor_name' else text_color, sensor_name_rect, 2)
-            text = input_font.render(sensor_name, True, text_color)
-            window.blit(text, (sensor_name_rect.x + 5, sensor_name_rect.y + 5))
-            if active_field == 'sensor_name' and cursor_visible:
-                cursor_x = sensor_name_rect.x + 5 + text.get_width()
-                pygame.draw.line(window, text_color, (cursor_x, sensor_name_rect.y + 5), (cursor_x, sensor_name_rect.y + 25), 2)
-        
-        # Buttons
-        mouse_pos = pygame.mouse.get_pos()
-        
-        # Save button
-        save_color = button_hover_color if save_button.collidepoint(mouse_pos) else button_color
-        pygame.draw.rect(window, save_color, save_button, border_radius=5)
-        text = label_font.render("Save", True, (255, 255, 255))
-        text_rect = text.get_rect(center=save_button.center)
-        window.blit(text, text_rect)
-        
-        # Cancel button
-        cancel_color = button_hover_color if cancel_button.collidepoint(mouse_pos) else button_color
-        pygame.draw.rect(window, cancel_color, cancel_button, border_radius=5)
-        text = label_font.render("Cancel", True, (255, 255, 255))
-        text_rect = text.get_rect(center=cancel_button.center)
-        window.blit(text, text_rect)
-        
-        # Delete button
-        delete_color = button_hover_color if delete_button.collidepoint(mouse_pos) else button_color
-        pygame.draw.rect(window, delete_color, delete_button, border_radius=5)
-        text = label_font.render("Delete", True, (255, 255, 255))
-        text_rect = text.get_rect(center=delete_button.center)
-        window.blit(text, text_rect)
-        
-        pygame.display.flip()
-        pygame.time.Clock().tick(30)
-    
-    # Restore screen
-    window.blit(screen_backup, (0, 0))
-    pygame.display.flip()
-    
-    if result_action == 'saved':
-        return name, species, photo_data, has_sensor, sensor_id, sensor_name, 'saved'
-    elif result_action == 'deleted':
-        return None, None, None, None, None, None, 'deleted'
-    else:
-        return None, None, None, None, None, None, 'canceled'
-
-# Function to draw buttons
-def draw_button(button_rect, text, enabled):
-    mouse_pos = pygame.mouse.get_pos()
-    if button_rect.collidepoint(mouse_pos) and enabled:
-        color = button_hover_color
-    else:
-        color = button_color if enabled else dimmed_button_color
-
-    pygame.draw.rect(window, color, button_rect, border_radius=5)
-    font = pygame.font.Font(None, 28)
-    text_surface = font.render(text, True, text_color if enabled else (255, 255, 255))
-    text_rect = text_surface.get_rect(center=button_rect.center)
-    window.blit(text_surface, text_rect)
-
-# Function to update buttons
-def update_buttons():
-    draw_button(load_garden_button, "Load Garden", True)
-    draw_button(create_garden_button, "Create Garden", True)
-    draw_button(add_plant_button, "Add Plant", garden_loaded_or_created and not is_creating_garden)
-    draw_button(add_image_button, "Add Image", garden_loaded_or_created and not is_creating_garden)
-    draw_button(undo_button, "Undo", len(undo_stack) > 0)
-    draw_button(redo_button, "Redo", len(redo_stack) > 0)
-    draw_button(save_button, "Save", garden_loaded_or_created)
-    draw_button(exit_button, "Exit", True)
-
-# Function to draw garden boundary
-def draw_garden_boundary():
-    if len(garden_boundary) > 1:
-        pygame.draw.lines(window, garden_border_color, is_creating_garden == False, garden_boundary, 3)
-
-# Function to draw starting point
-def draw_start_point():
-    if garden_boundary:
-        pygame.draw.circle(window, dot_color, garden_boundary[0], 3)
-
-# Function to draw grid
-def draw_grid():
-    cell_size = 20
-    if garden_loaded_or_created and not is_creating_garden and len(garden_boundary) > 2:
-        garden_polygon = Polygon(garden_boundary)
-        for x in range(0, garden_area_size[0] + cell_size, cell_size):
-            for y in range(0, garden_area_size[1] + cell_size, cell_size):
-                point = (x, y)
-                if garden_polygon.contains(Point(point)):
-                    pygame.draw.line(window, grid_color, (x, y), (x, y + cell_size))
-                    pygame.draw.line(window, grid_color, (x, y), (x + cell_size, y))
-    else:
-        for x in range(0, garden_area_size[0], cell_size):
-            pygame.draw.line(window, grid_color, (x, 0), (x, garden_area_size[1]))
-        for y in range(0, garden_area_size[1], cell_size):
-            pygame.draw.line(window, grid_color, (0, y), (garden_area_size[0], y))
-
-# Snap to nearest grid point
-def snap_to_grid(pos):
-    grid_size = 20
-    grid_x = round(pos[0] / grid_size) * grid_size
-    grid_y = round(pos[1] / grid_size) * grid_size
-    return (grid_x, grid_y)
-
-# Check if point is inside the garden boundary
-def point_in_garden(point, boundary):
-    if len(boundary) < 3:
-        return False
-    polygon = Polygon(boundary)
-    return polygon.contains(Point(point))
-
-# Function to add a plant
-def add_plant(mouse_pos):
-    global garden_modified
-    if not point_in_garden(mouse_pos, garden_boundary):
-        # На Raspberry Pi используем pygame для сообщений
-        if platform.system() == 'Linux' and 'arm' in platform.machine():
-            show_message_pygame("Warning", "Plants should be inside the garden!")
-        else:
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showwarning("Warning", "Plants should be inside the garden!")
-            root.destroy()
-        return
-
-    name, species, photo_data, has_sensor, sensor_id, sensor_name, action = get_plant_details()
-    if action == 'saved' and name:
-        snapped_pos = snap_to_grid(mouse_pos)
-        
-        # Process photo data
-        plant_image = default_plant_image
-        if photo_data:
-            try:
-                # Load image from blob
-                image_stream = io.BytesIO(photo_data)
-                pil_image = Image.open(image_stream)
-                
-                # Convert PIL image to pygame surface
-                image_string = pil_image.convert('RGBA').tobytes()
-                plant_image = pygame.image.fromstring(image_string, pil_image.size, 'RGBA')
-                plant_image = pygame.transform.scale(plant_image, (30, 30))
-            except Exception as e:
-                print(f"Error loading plant photo: {e}")
-                plant_image = default_plant_image
-        
-        plant = {
-            'position': snapped_pos,
-            'image': plant_image,
-            'photo_data': photo_data,  # Store photo data instead of path
-            'name': name,
-            'species': species,
-            'has_sensor': has_sensor,
-            'sensor_id': sensor_id if has_sensor else None,
-            'sensor_name': sensor_name if has_sensor else None
-        }
-        plants.append(plant)
-        add_undo_action('add_plant', plant)
-        garden_modified = True
-
-# Простое сообщение для Raspberry Pi
-def show_message_pygame(title, message):
-   """Show simple message dialog using pygame"""
-   screen_backup = window.copy()
-   
-   # Dialog settings
-   dialog_width = 400
-   dialog_height = 200
-   dialog_x = (window_width - dialog_width) // 2
-   dialog_y = (window_height - dialog_height) // 2
-   
-   bg_color = (240, 240, 240)
-   text_color = (0, 0, 0)
-   button_color = (33, 150, 243)
-   
-   # Fonts
-   title_font = pygame.font.Font(None, 28)
-   msg_font = pygame.font.Font(None, 22)
-   
-   running = True
-   clock = pygame.time.Clock()
-   
-   while running:
+       # Handle events
        for event in pygame.event.get():
-           if event.type == pygame.KEYDOWN:
-               if event.key == pygame.K_RETURN or event.key == pygame.K_ESCAPE:
+           if event.type == pygame.QUIT:
+               running = False
+               
+           elif event.type == pygame.KEYDOWN:
+               if event.key == pygame.K_ESCAPE:
                    running = False
+                   
+               elif event.key == pygame.K_TAB:
+                   # Cycle through fields
+                   if active_field == 'species':
+                       active_field = 'sensor_id' if has_sensor else None
+                   elif active_field == 'sensor_id':
+                       active_field = 'sensor_name'
+                   elif active_field == 'sensor_name':
+                       active_field = 'species'
+                   else:
+                       active_field = 'species'
+                       
+               elif active_field:
+                   if event.key == pygame.K_BACKSPACE:
+                       if active_field == 'species':
+                           species = species[:-1]
+                       elif active_field == 'sensor_id':
+                           sensor_id = sensor_id[:-1]
+                       elif active_field == 'sensor_name':
+                           sensor_name = sensor_name[:-1]
+                   elif event.unicode:
+                       if active_field == 'species':
+                           species += event.unicode
+                       elif active_field == 'sensor_id' and len(sensor_id) < 22:
+                           sensor_id += event.unicode
+                       elif active_field == 'sensor_name':
+                           sensor_name += event.unicode
+                           
            elif event.type == pygame.MOUSEBUTTONDOWN:
-               # Check if clicked on OK button
-               ok_button = pygame.Rect(dialog_x + dialog_width // 2 - 40, dialog_y + dialog_height - 50, 80, 30)
-               if ok_button.collidepoint(event.pos):
+               mouse_pos = event.pos
+               
+               # Check buttons
+               if save_button.collidepoint(mouse_pos):
+                   if name:  # Must have a plant name
+                       result_action = 'saved'
+                       running = False
+               elif cancel_button.collidepoint(mouse_pos):
                    running = False
+               elif delete_button.collidepoint(mouse_pos):
+                   result_action = 'deleted'
+                   running = False
+                   
+               # Check input fields
+               elif species_rect.collidepoint(mouse_pos):
+                   active_field = 'species'
+               elif sensor_id_rect.collidepoint(mouse_pos) and has_sensor:
+                   active_field = 'sensor_id'
+               elif sensor_name_rect.collidepoint(mouse_pos) and has_sensor:
+                   active_field = 'sensor_name'
+               else:
+                   active_field = None
+                   
+               # Check sensor checkbox area
+               sensor_checkbox_rect = pygame.Rect(dialog_x + 20, dialog_y + 180, 200, 30)
+               if sensor_checkbox_rect.collidepoint(mouse_pos):
+                   has_sensor = not has_sensor
+                   if not has_sensor:
+                       active_field = None
+                       
+               # Check plant type dropdown area
+               plant_dropdown_rect = pygame.Rect(dialog_x + 120, dialog_y + 70, 350, 30)
+               if plant_dropdown_rect.collidepoint(mouse_pos):
+                   # Simple cycling through plant types
+                   selected_plant_index = (selected_plant_index + 1) % len(plant_names)
+                   name = plant_names[selected_plant_index]
+                   # Update species
+                   for pt in plant_types:
+                       if pt['name'] == name:
+                           species = pt['latin_name'] or ''
+                           break
+       
+       # Update cursor blink
+       cursor_timer += 1
+       if cursor_timer >= 30:
+           cursor_visible = not cursor_visible
+           cursor_timer = 0
        
        # Draw
        window.blit(screen_backup, (0, 0))
        
-       # Dialog
+       # Draw dialog
        pygame.draw.rect(window, bg_color, (dialog_x, dialog_y, dialog_width, dialog_height))
        pygame.draw.rect(window, text_color, (dialog_x, dialog_y, dialog_width, dialog_height), 2)
        
        # Title
-       title_text = title_font.render(title, True, text_color)
+       title_text = title_font.render("Plant Details", True, text_color)
        title_rect = title_text.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + 20)
        window.blit(title_text, title_rect)
        
-       # Message
-       msg_text = msg_font.render(message, True, text_color)
-       msg_rect = msg_text.get_rect(centerx=dialog_x + dialog_width // 2, y=dialog_y + 80)
-       window.blit(msg_text, msg_rect)
+       # Plant type
+       label = label_font.render("Plant Type:", True, text_color)
+       window.blit(label, (dialog_x + 20, dialog_y + 75))
+       pygame.draw.rect(window, input_bg_color, (dialog_x + 120, dialog_y + 70, 350, 30))
+       pygame.draw.rect(window, text_color, (dialog_x + 120, dialog_y + 70, 350, 30), 1)
+       text = input_font.render(name, True, text_color)
+       window.blit(text, (dialog_x + 125, dialog_y + 75))
        
-       # OK button
-       ok_button = pygame.Rect(dialog_x + dialog_width // 2 - 40, dialog_y + dialog_height - 50, 80, 30)
-       pygame.draw.rect(window, button_color, ok_button, border_radius=5)
-       ok_text = msg_font.render("OK", True, (255, 255, 255))
-       ok_rect = ok_text.get_rect(center=ok_button.center)
-       window.blit(ok_text, ok_rect)
+       # Species
+       label = label_font.render("Species:", True, text_color)
+       window.blit(label, (dialog_x + 20, dialog_y + 125))
+       pygame.draw.rect(window, input_bg_color, species_rect)
+       pygame.draw.rect(window, selected_color if active_field == 'species' else text_color, species_rect, 2)
+       text = input_font.render(species, True, text_color)
+       window.blit(text, (species_rect.x + 5, species_rect.y + 5))
+       if active_field == 'species' and cursor_visible:
+           cursor_x = species_rect.x + 5 + text.get_width()
+           pygame.draw.line(window, text_color, (cursor_x, species_rect.y + 5), (cursor_x, species_rect.y + 25), 2)
+       
+       # Sensor checkbox
+       checkbox_rect = pygame.Rect(dialog_x + 20, dialog_y + 180, 20, 20)
+       pygame.draw.rect(window, input_bg_color, checkbox_rect)
+       pygame.draw.rect(window, text_color, checkbox_rect, 2)
+       if has_sensor:
+           pygame.draw.line(window, text_color, (checkbox_rect.x + 4, checkbox_rect.y + 10), 
+                          (checkbox_rect.x + 8, checkbox_rect.y + 14), 2)
+           pygame.draw.line(window, text_color, (checkbox_rect.x + 8, checkbox_rect.y + 14), 
+                          (checkbox_rect.x + 16, checkbox_rect.y + 6), 2)
+       label = label_font.render("Add Sensor", True, text_color)
+       window.blit(label, (dialog_x + 50, dialog_y + 180))
+       
+       # Sensor fields (if enabled)
+       if has_sensor:
+           # Sensor ID
+           label = label_font.render("Sensor ID:", True, text_color)
+           window.blit(label, (dialog_x + 20, dialog_y + 225))
+           pygame.draw.rect(window, input_bg_color, sensor_id_rect)
+           pygame.draw.rect(window, selected_color if active_field == 'sensor_id' else text_color, sensor_id_rect, 2)
+           text = input_font.render(sensor_id, True, text_color)
+           window.blit(text, (sensor_id_rect.x + 5, sensor_id_rect.y + 5))
+           if active_field == 'sensor_id' and cursor_visible:
+               cursor_x = sensor_id_rect.x + 5 + text.get_width()
+               pygame.draw.line(window, text_color, (cursor_x, sensor_id_rect.y + 5), (cursor_x, sensor_id_rect.y + 25), 2)
+           
+           # Sensor Name
+           label = label_font.render("Sensor Name:", True, text_color)
+           window.blit(label, (dialog_x + 20, dialog_y + 275))
+           pygame.draw.rect(window, input_bg_color, sensor_name_rect)
+           pygame.draw.rect(window, selected_color if active_field == 'sensor_name' else text_color, sensor_name_rect, 2)
+           text = input_font.render(sensor_name, True, text_color)
+           window.blit(text, (sensor_name_rect.x + 5, sensor_name_rect.y + 5))
+           if active_field == 'sensor_name' and cursor_visible:
+               cursor_x = sensor_name_rect.x + 5 + text.get_width()
+               pygame.draw.line(window, text_color, (cursor_x, sensor_name_rect.y + 5), (cursor_x, sensor_name_rect.y + 25), 2)
+       
+       # Buttons
+       mouse_pos = pygame.mouse.get_pos()
+       
+       # Save button
+       save_color = button_hover_color if save_button.collidepoint(mouse_pos) else button_color
+       pygame.draw.rect(window, save_color, save_button, border_radius=5)
+       text = label_font.render("Save", True, (255, 255, 255))
+       text_rect = text.get_rect(center=save_button.center)
+       window.blit(text, text_rect)
+       
+       # Cancel button
+       cancel_color = button_hover_color if cancel_button.collidepoint(mouse_pos) else button_color
+       pygame.draw.rect(window, cancel_color, cancel_button, border_radius=5)
+       text = label_font.render("Cancel", True, (255, 255, 255))
+       text_rect = text.get_rect(center=cancel_button.center)
+       window.blit(text, text_rect)
+       
+       # Delete button
+       delete_color = button_hover_color if delete_button.collidepoint(mouse_pos) else button_color
+       pygame.draw.rect(window, delete_color, delete_button, border_radius=5)
+       text = label_font.render("Delete", True, (255, 255, 255))
+       text_rect = text.get_rect(center=delete_button.center)
+       window.blit(text, text_rect)
        
        pygame.display.flip()
-       clock.tick(30)
+       pygame.time.Clock().tick(30)
    
-   window.blit(screen_backup, (0, 0))
-   pygame.display.flip()
+   # Restore screen
+    window.blit(screen_backup, (0, 0))
+    pygame.display.flip()
+   
+    if result_action == 'saved':
+       return name, species, photo_data, has_sensor, sensor_id, sensor_name, 'saved'
+    elif result_action == 'deleted':
+       return None, None, None, None, None, None, 'deleted'
+    else:
+       return None, None, None, None, None, None, 'canceled'
+
+# Function to draw buttons
+def draw_button(button_rect, text, enabled):
+   mouse_pos = pygame.mouse.get_pos()
+   if button_rect.collidepoint(mouse_pos) and enabled:
+       color = button_hover_color
+   else:
+       color = button_color if enabled else dimmed_button_color
+
+   pygame.draw.rect(window, color, button_rect, border_radius=5)
+   font = pygame.font.Font(None, 28)
+   text_surface = font.render(text, True, text_color if enabled else (255, 255, 255))
+   text_rect = text_surface.get_rect(center=button_rect.center)
+   window.blit(text_surface, text_rect)
+
+# Function to update buttons
+def update_buttons():
+   draw_button(load_garden_button, "Load Garden", True)
+   draw_button(create_garden_button, "Create Garden", True)
+   draw_button(add_plant_button, "Add Plant", garden_loaded_or_created and not is_creating_garden)
+   draw_button(add_image_button, "Add Image", garden_loaded_or_created and not is_creating_garden)
+   draw_button(undo_button, "Undo", len(undo_stack) > 0)
+   draw_button(redo_button, "Redo", len(redo_stack) > 0)
+   
+   # Modify save button text for remote mode
+   save_text = "Save & Sync" if remote_mode and has_db_changes else "Save"
+   draw_button(save_button, save_text, garden_loaded_or_created)
+   draw_button(exit_button, "Exit", True)
+
+# Function to draw garden boundary
+def draw_garden_boundary():
+   if len(garden_boundary) > 1:
+       pygame.draw.lines(window, garden_border_color, is_creating_garden == False, garden_boundary, 3)
+
+# Function to draw starting point
+def draw_start_point():
+   if garden_boundary:
+       pygame.draw.circle(window, dot_color, garden_boundary[0], 3)
+
+# Function to draw grid
+def draw_grid():
+   cell_size = 20
+   if garden_loaded_or_created and not is_creating_garden and len(garden_boundary) > 2:
+       garden_polygon = Polygon(garden_boundary)
+       for x in range(0, garden_area_size[0] + cell_size, cell_size):
+           for y in range(0, garden_area_size[1] + cell_size, cell_size):
+               point = (x, y)
+               if garden_polygon.contains(Point(point)):
+                   pygame.draw.line(window, grid_color, (x, y), (x, y + cell_size))
+                   pygame.draw.line(window, grid_color, (x, y), (x + cell_size, y))
+   else:
+       for x in range(0, garden_area_size[0], cell_size):
+           pygame.draw.line(window, grid_color, (x, 0), (x, garden_area_size[1]))
+       for y in range(0, garden_area_size[1], cell_size):
+           pygame.draw.line(window, grid_color, (0, y), (garden_area_size[0], y))
+
+# Check if point is inside the garden boundary
+def point_in_garden(point, boundary):
+   if len(boundary) < 3:
+       return False
+   polygon = Polygon(boundary)
+   return polygon.contains(Point(point))
+
+# Function to add a plant
+def add_plant(mouse_pos):
+   global garden_modified
+   if not point_in_garden(mouse_pos, garden_boundary):
+       # На Raspberry Pi используем pygame для сообщений
+       if platform.system() == 'Linux' and 'arm' in platform.machine():
+           show_message_pygame("Warning", "Plants should be inside the garden!")
+       else:
+           root = tk.Tk()
+           root.withdraw()
+           messagebox.showwarning("Warning", "Plants should be inside the garden!")
+           root.destroy()
+       return
+
+   name, species, photo_data, has_sensor, sensor_id, sensor_name, action = get_plant_details()
+   if action == 'saved' and name:
+       snapped_pos = snap_to_grid(mouse_pos)
+       
+       # Process photo data
+       plant_image = default_plant_image
+       if photo_data:
+           try:
+               # Load image from blob
+               image_stream = io.BytesIO(photo_data)
+               pil_image = Image.open(image_stream)
+               
+               # Convert PIL image to pygame surface
+               image_string = pil_image.convert('RGBA').tobytes()
+               plant_image = pygame.image.frombytes(image_string, pil_image.size, 'RGBA')
+               plant_image = pygame.transform.scale(plant_image, (30, 30))
+           except Exception as e:
+               print(f"Error loading plant photo: {e}")
+               plant_image = default_plant_image
+       
+       plant = {
+           'position': snapped_pos,
+           'image': plant_image,
+           'photo_data': photo_data,  # Store photo data instead of path
+           'name': name,
+           'species': species,
+           'has_sensor': has_sensor,
+           'sensor_id': sensor_id if has_sensor else None,
+           'sensor_name': sensor_name if has_sensor else None
+       }
+       plants.append(plant)
+       add_undo_action('add_plant', plant)
+       garden_modified = True
+       mark_db_changed()
 
 # Function to edit a plant
 def edit_plant(plant):
@@ -1638,7 +1836,7 @@ def edit_plant(plant):
                
                # Convert PIL image to pygame surface
                image_string = pil_image.convert('RGBA').tobytes()
-               plant_image = pygame.image.fromstring(image_string, pil_image.size, 'RGBA')
+               plant_image = pygame.image.frombytes(image_string, pil_image.size, 'RGBA')
                plant_image = pygame.transform.scale(plant_image, (30, 30))
                
                plant['image'] = plant_image
@@ -1653,6 +1851,7 @@ def edit_plant(plant):
            'old_data': old_data
        })
        garden_modified = True
+       mark_db_changed()
    elif action == 'deleted':
        plants.remove(plant)
        add_undo_action('delete_plant', {
@@ -1660,6 +1859,7 @@ def edit_plant(plant):
            'index': index
        })
        garden_modified = True
+       mark_db_changed()
 
 # Function to add an image
 def add_image(mouse_pos):
@@ -1691,6 +1891,7 @@ def add_image(mouse_pos):
            images.append(image_data)
            add_undo_action('add_image', image_data)
            garden_modified = True
+           mark_db_changed()
        except pygame.error:
            print(f"Error loading image: {image_file}")
 
@@ -1700,6 +1901,7 @@ def add_undo_action(action_type, data):
    redo_stack.clear()
    global garden_modified
    garden_modified = True
+   mark_db_changed()
 
 def undo():
    global is_creating_garden, garden_modified
@@ -1727,6 +1929,7 @@ def undo():
            images.insert(data['index'], data['image'])
        redo_stack.append((action_type, data))
        garden_modified = True
+       mark_db_changed()
        if len(garden_boundary) == 0:
            is_creating_garden = False
 
@@ -1755,71 +1958,274 @@ def redo():
            images.remove(data['image'])
        undo_stack.append((action_type, data))
        garden_modified = True
+       mark_db_changed()
 
 # Function to save the garden
-def save_garden():
-   """Save garden to database or export to JSON"""
-   if platform.system() == 'Linux' and 'arm' in platform.machine():
-       # На Raspberry Pi сохраняем только в базу данных
-       try:
-           save_garden_to_db()
-       except Exception as e:
-           print(f"Error during save: {e}")
-           show_message_pygame("Error", "Failed to save garden")
-       return
-   
-   # На других платформах используем оригинальную версию
-   root = tk.Tk()
-   root.withdraw()
-   
-   choice = messagebox.askyesnocancel(
-       "Save Garden",
-       "Save to database (Yes) or export to JSON file (No)?",
-       icon='question'
-   )
-   
-   if choice is True:
-       # Save to database
-       try:
-           save_garden_to_db()
-       except Exception as e:
-           print(f"Error during save: {e}")
-   elif choice is False:
-       # Export to JSON (note: photos won't be included in JSON export)
-       save_file = filedialog.asksaveasfilename(
-           defaultextension=".json",
-           filetypes=(("JSON files", "*.json"),)
-       )
-       if save_file:
-           data = {
-               "boundary": garden_boundary,
-               "plants": [
-                   {
-                       "position": plant['position'],
-                       "name": plant['name'],
-                       "species": plant.get('species', ''),
-                       "has_sensor": plant['has_sensor'],
-                       "sensor_id": plant['sensor_id'] if plant['has_sensor'] else None,
-                       "sensor_name": plant['sensor_name'] if plant['has_sensor'] else None,
-                       "has_photo": plant.get('photo_data') is not None  # Just indicate if photo exists
-                   } for plant in plants
-               ],
-               "images": [
-                   {
-                       "position": [image_data['rect'].x, image_data['rect'].y],
-                       "size": [image_data['rect'].width, image_data['rect'].height],
-                       "image_path": os.path.relpath(image_data.get('image_path', ''), start=os.getcwd()).replace('\\', '/')
-                   } for image_data in images
-               ]
-           }
-           with open(save_file, 'w') as f:
-               json.dump(data, f)
-           print(f"Garden exported to {save_file}")
-           messagebox.showinfo("Note", "Garden exported to JSON. Note that plant photos are stored in the database and not included in the JSON export.")
-           global garden_modified
-           garden_modified = False
-   
-   root.destroy()
+def save_garden_to_db():
+    """Save garden to database with complete implementation"""
+    global garden_modified, has_db_changes, current_layout_id
+    
+    if not garden_boundary:
+        if platform.system() == 'Linux' and 'arm' in platform.machine():
+            show_message_pygame("Error", "No garden boundary to save!")
+        else:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Error", "No garden boundary to save!")
+            root.destroy()
+        return
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Create tables if they don't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS garden_layouts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                boundary_points TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS plant_types (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                latin_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Check if garden_plants table has unique_id column
+        cursor.execute("PRAGMA table_info(garden_plants)")
+        columns = [column[1] for column in cursor.fetchall()]
+        has_unique_id = 'unique_id' in columns
+        
+        if has_unique_id:
+            # Table has unique_id - create with it
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS garden_plants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    garden_layout_id INTEGER NOT NULL,
+                    plant_type_id INTEGER NOT NULL,
+                    custom_name TEXT,
+                    position_x REAL NOT NULL,
+                    position_y REAL NOT NULL,
+                    has_sensor INTEGER DEFAULT 0,
+                    sensor_id TEXT,
+                    sensor_name TEXT,
+                    unique_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (garden_layout_id) REFERENCES garden_layouts (id),
+                    FOREIGN KEY (plant_type_id) REFERENCES plant_types (id)
+                )
+            ''')
+        else:
+            # Table doesn't have unique_id - create without it
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS garden_plants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    garden_layout_id INTEGER NOT NULL,
+                    plant_type_id INTEGER NOT NULL,
+                    custom_name TEXT,
+                    position_x REAL NOT NULL,
+                    position_y REAL NOT NULL,
+                    has_sensor INTEGER DEFAULT 0,
+                    sensor_id TEXT,
+                    sensor_name TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (garden_layout_id) REFERENCES garden_layouts (id),
+                    FOREIGN KEY (plant_type_id) REFERENCES plant_types (id)
+                )
+            ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS plant_photos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                garden_plant_id INTEGER NOT NULL,
+                photo_data BLOB,
+                photo_type TEXT DEFAULT 'main',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (garden_plant_id) REFERENCES garden_plants (id)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS garden_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                garden_layout_id INTEGER NOT NULL,
+                image_path TEXT NOT NULL,
+                position_x REAL NOT NULL,
+                position_y REAL NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (garden_layout_id) REFERENCES garden_layouts (id)
+            )
+        ''')
+        
+        # Get garden name
+        garden_name = "Garden"
+        if current_layout_id:
+            cursor.execute('SELECT name FROM garden_layouts WHERE id = ?', (current_layout_id,))
+            existing = cursor.fetchone()
+            if existing:
+                garden_name = existing['name']
+        else:
+            # Ask for garden name if creating new
+            if platform.system() == 'Linux' and 'arm' in platform.machine():
+                garden_name = "Pi Garden"  # Default name for Pi
+            else:
+                root = tk.Tk()
+                root.withdraw()
+                garden_name = simpledialog.askstring("Garden Name", "Enter garden name:", initialvalue="My Garden")
+                root.destroy()
+                if not garden_name:
+                    garden_name = "My Garden"
+        
+        # Save or update garden layout
+        boundary_json = json.dumps(garden_boundary)
+        
+        if current_layout_id:
+            # Update existing layout
+            cursor.execute('''
+                UPDATE garden_layouts 
+                SET name = ?, boundary_points = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (garden_name, boundary_json, current_layout_id))
+            layout_id = current_layout_id
+        else:
+            # Create new layout
+            cursor.execute('''
+                INSERT INTO garden_layouts (name, boundary_points)
+                VALUES (?, ?)
+            ''', (garden_name, boundary_json))
+            layout_id = cursor.lastrowid
+            current_layout_id = layout_id
+        
+        # Clear existing plants and images for this layout
+        cursor.execute('DELETE FROM plant_photos WHERE garden_plant_id IN (SELECT id FROM garden_plants WHERE garden_layout_id = ?)', (layout_id,))
+        cursor.execute('DELETE FROM garden_plants WHERE garden_layout_id = ?', (layout_id,))
+        cursor.execute('DELETE FROM garden_images WHERE garden_layout_id = ?', (layout_id,))
+        
+        # Save plants
+        for plant in plants:
+            # Get or create plant type
+            plant_name = plant['name']
+            plant_species = plant.get('species', '')
+            
+            cursor.execute('SELECT id FROM plant_types WHERE name = ?', (plant_name,))
+            plant_type_row = cursor.fetchone()
+            
+            if plant_type_row:
+                plant_type_id = plant_type_row['id']
+                # Update species if provided
+                if plant_species:
+                    cursor.execute('UPDATE plant_types SET latin_name = ? WHERE id = ?', (plant_species, plant_type_id))
+            else:
+                # Create new plant type
+                cursor.execute('INSERT INTO plant_types (name, latin_name) VALUES (?, ?)', (plant_name, plant_species))
+                plant_type_id = cursor.lastrowid
+            
+            # Save plant instance - адаптируется к структуре таблицы
+            if has_unique_id:
+                # Generate unique_id
+                import hashlib
+                import time
+                unique_data = f"{plant_name}_{plant['position'][0]}_{plant['position'][1]}_{time.time()}"
+                unique_id = hashlib.md5(unique_data.encode()).hexdigest()[:22]
+                
+                cursor.execute('''
+                    INSERT INTO garden_plants 
+                    (garden_layout_id, plant_type_id, custom_name, position_x, position_y, 
+                     has_sensor, sensor_id, sensor_name, unique_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    layout_id, plant_type_id, plant_name, 
+                    plant['position'][0], plant['position'][1],
+                    1 if plant.get('has_sensor', False) else 0,
+                    plant.get('sensor_id'),
+                    plant.get('sensor_name'),
+                    unique_id
+                ))
+            else:
+                cursor.execute('''
+                    INSERT INTO garden_plants 
+                    (garden_layout_id, plant_type_id, custom_name, position_x, position_y, 
+                     has_sensor, sensor_id, sensor_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    layout_id, plant_type_id, plant_name, 
+                    plant['position'][0], plant['position'][1],
+                    1 if plant.get('has_sensor', False) else 0,
+                    plant.get('sensor_id'),
+                    plant.get('sensor_name')
+                ))
+            
+            garden_plant_id = cursor.lastrowid
+            
+            # Save plant photos
+            all_photos = plant.get('all_photos', [])
+            if not all_photos and plant.get('photo_data'):
+                # Convert single photo to all_photos format
+                all_photos = [{
+                    'photo_data': plant['photo_data'],
+                    'photo_type': 'main'
+                }]
+            
+            for photo in all_photos:
+                if photo.get('photo_data'):
+                    cursor.execute('''
+                        INSERT INTO plant_photos (garden_plant_id, photo_data, photo_type)
+                        VALUES (?, ?, ?)
+                    ''', (garden_plant_id, photo['photo_data'], photo.get('photo_type', 'main')))
+        
+        # Save images
+        for image_data in images:
+            cursor.execute('''
+                INSERT INTO garden_images 
+                (garden_layout_id, image_path, position_x, position_y, width, height)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                layout_id,
+                image_data.get('image_path', ''),
+                image_data['rect'].x,
+                image_data['rect'].y,
+                image_data['rect'].width,
+                image_data['rect'].height
+            ))
+        
+        conn.commit()
+        garden_modified = False
+        has_db_changes = False  # Mark as actually saved
+        
+        if remote_mode:
+            sync_remote_database()
+        
+        if platform.system() == 'Linux' and 'arm' in platform.machine():
+            show_message_pygame("Success", "Garden saved successfully!")
+        else:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showinfo("Success", "Garden saved successfully!")
+            root.destroy()
+            
+    except Exception as e:
+        conn.rollback()
+        print(f"Error saving garden: {e}")
+        if platform.system() == 'Linux' and 'arm' in platform.machine():
+            show_message_pygame("Error", f"Failed to save garden: {str(e)}")
+        else:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Error", f"Failed to save garden: {str(e)}")
+            root.destroy()
+    finally:
+        conn.close()
 
 # Function to create garden boundary
 def create_garden(pos):
@@ -1833,6 +2239,7 @@ def create_garden(pos):
        is_creating_garden = False
        garden_loaded_or_created = True
        garden_modified = True
+       mark_db_changed()
        return
 
    # Add segment only if the left mouse button is clicked
@@ -1854,6 +2261,9 @@ def exit_app():
            if messagebox.askyesno("Exit", "Garden has unsaved changes. Save before exiting?"):
                save_garden()
            root.destroy()
+   
+   # Clean up SSH connection if in remote mode
+   cleanup_ssh()
    pygame.quit()
    sys.exit()
 
@@ -2259,6 +2669,82 @@ def is_double_click(pos, current_time):
 pygame.font.init()
 font = pygame.font.Font(None, 20)
 
+# Draw status indicator for remote mode
+def draw_remote_status():
+   """Draw remote connection status"""
+   if remote_mode:
+       status_text = f"Remote Mode - {'Changes pending' if has_db_changes else 'Up to date'}"
+       status_color = (255, 0, 0) if has_db_changes else (0, 128, 0)
+       text_surface = font.render(status_text, True, status_color)
+       window.blit(text_surface, (10, window_height - button_area_height - 30))
+
+# Function to save the garden - ADD THIS MISSING FUNCTION
+def save_garden():
+    """Save garden to database or export to JSON"""
+    if platform.system() == 'Linux' and 'arm' in platform.machine():
+        # На Raspberry Pi сохраняем только в базу данных
+        try:
+            save_garden_to_db()
+        except Exception as e:
+            print(f"Error during save: {e}")
+            show_message_pygame("Error", "Failed to save garden")
+        return
+    
+    # На других платформах используем оригинальную версию
+    root = tk.Tk()
+    root.withdraw()
+    
+    choice = messagebox.askyesnocancel(
+        "Save Garden",
+        "Save to database (Yes) or export to JSON file (No)?",
+        icon='question'
+    )
+    
+    if choice is True:
+        # Save to database
+        try:
+            save_garden_to_db()
+        except Exception as e:
+            print(f"Error during save: {e}")
+            messagebox.showerror("Error", f"Failed to save garden: {str(e)}")
+    elif choice is False:
+        # Export to JSON (note: photos won't be included in JSON export)
+        save_file = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=(("JSON files", "*.json"),)
+        )
+        if save_file:
+            data = {
+                "boundary": garden_boundary,
+                "plants": [
+                    {
+                        "position": plant['position'],
+                        "name": plant['name'],
+                        "species": plant.get('species', ''),
+                        "has_sensor": plant['has_sensor'],
+                        "sensor_id": plant['sensor_id'] if plant['has_sensor'] else None,
+                        "sensor_name": plant['sensor_name'] if plant['has_sensor'] else None,
+                        "has_photo": plant.get('photo_data') is not None  # Just indicate if photo exists
+                    } for plant in plants
+                ],
+                "images": [
+                    {
+                        "position": [image_data['rect'].x, image_data['rect'].y],
+                        "size": [image_data['rect'].width, image_data['rect'].height],
+                        "image_path": os.path.relpath(image_data.get('image_path', ''), start=os.getcwd()).replace('\\', '/')
+                    } for image_data in images
+                ]
+            }
+            with open(save_file, 'w') as f:
+                json.dump(data, f)
+            print(f"Garden exported to {save_file}")
+            messagebox.showinfo("Note", "Garden exported to JSON. Note that plant photos are stored in the database and not included in the JSON export.")
+            global garden_modified
+            garden_modified = False
+    
+    root.destroy()
+
+
 # Main program loop
 running = True
 while running:
@@ -2415,6 +2901,7 @@ while running:
                        is_adding_plant = False
                        garden_loaded_or_created = False
                        garden_modified = True
+                       mark_db_changed()
 
                    # Logic for Add Plant button
                    elif add_plant_button.collidepoint(mouse_pos) and garden_loaded_or_created:
@@ -2507,6 +2994,7 @@ while running:
                                images.remove(selected_image)
                                add_undo_action('delete_image', {'image': selected_image, 'index': index})
                                garden_modified = True
+                               mark_db_changed()
                            selected_image = None
 
        elif event.type == pygame.MOUSEMOTION:
@@ -2578,6 +3066,9 @@ while running:
 
    # Update buttons
    update_buttons()
+   
+   # Draw remote status
+   draw_remote_status()
 
    # Update display
    pygame.display.flip()

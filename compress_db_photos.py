@@ -2,6 +2,7 @@
 """
 Compress Photos in Database
 Compresses all plant photos in the database to reduce storage size
+Supports both local and remote (SSH) database connections
 """
 
 import sqlite3
@@ -14,9 +15,22 @@ from tkinter import ttk, messagebox, scrolledtext
 import threading
 import queue
 import sys
+import os
+import configparser
+import paramiko
+import tempfile
 
 # Configuration
 DB_FILE = 'garden_sensors.db'
+
+# Remote connection variables
+ssh_client = None
+sftp_client = None
+remote_mode = False
+remote_db_path = None
+local_temp_db = None
+db_file_path = DB_FILE
+has_db_changes = False
 
 # Default settings (note: corrected as per requirements)
 DEFAULT_MAIN_PHOTO_SETTINGS = {
@@ -37,11 +51,16 @@ ADDITIONAL_PHOTO_SETTINGS = DEFAULT_ADDITIONAL_PHOTO_SETTINGS.copy()
 
 def get_db_connection():
     """Create a database connection"""
-    conn = sqlite3.connect(DB_FILE, timeout=30.0)
+    conn = sqlite3.connect(db_file_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     # Enable WAL mode for better concurrency
     conn.execute('PRAGMA journal_mode=WAL')
     return conn
+
+def mark_db_changed():
+    """Mark that database has been changed"""
+    global has_db_changes
+    has_db_changes = True
 
 def format_bytes(size):
     """Format bytes to human readable string"""
@@ -50,6 +69,386 @@ def format_bytes(size):
             return f"{size:.2f} {unit}"
         size /= 1024.0
     return f"{size:.2f} TB"
+
+def cleanup_ssh():
+    """Clean up SSH connection and temp files"""
+    global ssh_client, sftp_client, local_temp_db
+    
+    if sftp_client:
+        try:
+            sftp_client.close()
+        except:
+            pass
+    
+    if ssh_client:
+        try:
+            ssh_client.close()
+        except:
+            pass
+    
+    if local_temp_db and os.path.exists(local_temp_db.name):
+        try:
+            os.unlink(local_temp_db.name)
+        except:
+            pass
+
+def sync_remote_database(progress_callback=None):
+    """Sync local temp database with remote"""
+    global sftp_client, local_temp_db, remote_db_path, has_db_changes
+    
+    if not remote_mode or not sftp_client:
+        return True
+    
+    try:
+        # Get file size for progress
+        file_size = os.path.getsize(local_temp_db.name)
+        
+        # Upload with progress callback
+        uploaded = [0]
+        
+        def upload_callback(transferred, total):
+            uploaded[0] = transferred
+            progress = int(transferred * 100 / total)
+            if progress_callback:
+                progress_callback(f"Uploading database... ({transferred//(1024*1024)} MB)", progress)
+        
+        # Upload temp file to remote
+        sftp_client.put(local_temp_db.name, remote_db_path, callback=upload_callback)
+        
+        if progress_callback:
+            progress_callback("Sync complete!", 100)
+        
+        has_db_changes = False
+        return True
+        
+    except Exception as e:
+        print(f"Sync error: {e}")
+        return False
+
+class DatabaseConnectionDialog:
+    def __init__(self, parent=None):
+        self.result = None
+        self.attempts = 0
+        self.max_attempts = 3
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel(parent) if parent else tk.Tk()
+        self.dialog.title("Database Connection")
+        self.dialog.geometry("550x550")
+        self.dialog.resizable(True, True)
+        self.dialog.minsize(550, 450)
+        
+        # Center dialog
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (275)
+        y = (self.dialog.winfo_screenheight() // 2) - (275)
+        self.dialog.geometry(f"550x550+{x}+{y}")
+        
+        if parent:
+            self.dialog.transient(parent)
+            self.dialog.grab_set()
+        
+        self.create_widgets()
+        
+        # Load config
+        self.load_config()
+        
+        # Protocol for window closing
+        self.dialog.protocol("WM_DELETE_WINDOW", self.on_cancel)
+    
+    def create_widgets(self):
+        # Create main scrollable frame
+        canvas = tk.Canvas(self.dialog)
+        scrollbar = ttk.Scrollbar(self.dialog, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Main frame within scrollable area
+        main_frame = ttk.Frame(self.scrollable_frame, padding="20")
+        main_frame.pack(fill='both', expand=True)
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Database Connection Mode", 
+                               font=("Arial", 14, "bold"))
+        title_label.pack(pady=(0, 20))
+        
+        # Mode selection
+        self.mode_var = tk.StringVar(value="local")
+        
+        mode_frame = ttk.LabelFrame(main_frame, text="Connection Type", padding="10")
+        mode_frame.pack(fill='x', pady=(0, 15))
+        
+        ttk.Radiobutton(mode_frame, text="Local Database", 
+                       variable=self.mode_var, value="local",
+                       command=self.on_mode_change).pack(anchor='w', pady=2)
+        ttk.Radiobutton(mode_frame, text="Remote Database (SSH)", 
+                       variable=self.mode_var, value="remote",
+                       command=self.on_mode_change).pack(anchor='w', pady=2)
+        
+        # Remote settings frame
+        self.remote_frame = ttk.LabelFrame(main_frame, text="Remote Connection Settings", padding="10")
+        self.remote_frame.pack(fill='x', pady=(0, 15))
+        
+        # Login field
+        login_frame = ttk.Frame(self.remote_frame)
+        login_frame.pack(fill='x', pady=(0, 8))
+        ttk.Label(login_frame, text="Login:", width=12).pack(side='left')
+        self.login_var = tk.StringVar()
+        self.login_entry = ttk.Entry(login_frame, textvariable=self.login_var, width=35)
+        self.login_entry.pack(side='left', fill='x', expand=True, padx=(5, 0))
+        
+        # Directory field
+        dir_frame = ttk.Frame(self.remote_frame)
+        dir_frame.pack(fill='x', pady=(0, 8))
+        ttk.Label(dir_frame, text="Directory:", width=12).pack(side='left')
+        self.dir_var = tk.StringVar()
+        self.dir_entry = ttk.Entry(dir_frame, textvariable=self.dir_var, width=35)
+        self.dir_entry.pack(side='left', fill='x', expand=True, padx=(5, 0))
+        
+        # Password field
+        password_frame = ttk.Frame(self.remote_frame)
+        password_frame.pack(fill='x', pady=(0, 8))
+        ttk.Label(password_frame, text="Password:", width=12).pack(side='left')
+        self.password_var = tk.StringVar()
+        self.password_entry = ttk.Entry(password_frame, textvariable=self.password_var, 
+                                       show='*', width=35)
+        self.password_entry.pack(side='left', fill='x', expand=True, padx=(5, 0))
+        
+        # Error/status label
+        self.status_label = ttk.Label(self.remote_frame, text="", foreground="red", wraplength=450)
+        self.status_label.pack(pady=(10, 0), anchor='w')
+        
+        # Progress frame (initially hidden)
+        self.progress_frame = ttk.LabelFrame(main_frame, text="Connection Progress", padding="10")
+        
+        self.progress_label = ttk.Label(self.progress_frame, text="Connecting...", wraplength=450)
+        self.progress_label.pack(pady=(0, 10), anchor='w')
+        
+        self.progress_bar = ttk.Progressbar(self.progress_frame, mode='determinate', length=450)
+        self.progress_bar.pack(fill='x', pady=(0, 10))
+        
+        # Buttons frame - always at bottom
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill='x', pady=(20, 10), side='bottom')
+        
+        # Center the buttons
+        button_container = ttk.Frame(button_frame)
+        button_container.pack(expand=True)
+        
+        self.ok_button = ttk.Button(button_container, text="OK", command=self.on_ok, width=10)
+        self.ok_button.pack(side='left', padx=(0, 10))
+        
+        self.cancel_button = ttk.Button(button_container, text="Cancel", command=self.on_cancel, width=10)
+        self.cancel_button.pack(side='left')
+        
+        # Bind mouse wheel to canvas
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        canvas.bind("<MouseWheel>", _on_mousewheel)  # Windows
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))  # Linux
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))   # Linux
+        
+        # Initially update state
+        self.on_mode_change()
+    
+    def load_config(self):
+        """Load configuration from garden.ini"""
+        try:
+            config = configparser.ConfigParser()
+            config_file = 'garden.ini'
+            if os.path.exists(config_file):
+                config.read(config_file)
+                try:
+                    login = config.get('Remote', 'login')
+                    remote_dir = config.get('Remote', 'dir')
+                    self.login_var.set(login)
+                    self.dir_var.set(remote_dir)
+                except (configparser.NoSectionError, configparser.NoOptionError):
+                    pass
+        except Exception as e:
+            print(f"Error loading config: {e}")
+    
+    def on_mode_change(self):
+        """Handle mode change"""
+        is_remote = self.mode_var.get() == "remote"
+        
+        # Show/hide remote settings
+        if is_remote:
+            if not self.remote_frame.winfo_viewable():
+                self.remote_frame.pack(fill='x', pady=(0, 15), after=self.scrollable_frame.children['!frame'].children['!labelframe'])
+        else:
+            if self.remote_frame.winfo_viewable():
+                self.remote_frame.pack_forget()
+        
+        # Update window content
+        self.dialog.update_idletasks()
+    
+    def show_progress(self, text, progress=0):
+        """Show progress bar"""
+        self.progress_label.config(text=text)
+        self.progress_bar['value'] = progress
+        
+        if not self.progress_frame.winfo_viewable():
+            self.progress_frame.pack(fill='x', pady=(15, 0), 
+                                   after=self.remote_frame)
+        
+        # Disable buttons during progress
+        self.ok_button.config(state='disabled')
+        self.cancel_button.config(state='disabled')
+        
+        self.dialog.update()
+    
+    def hide_progress(self):
+        """Hide progress bar"""
+        if self.progress_frame.winfo_viewable():
+            self.progress_frame.pack_forget()
+        
+        # Re-enable buttons
+        self.ok_button.config(state='normal')
+        self.cancel_button.config(state='normal')
+        
+        self.dialog.update()
+    
+    def setup_remote_connection(self):
+        """Setup SSH connection to remote database"""
+        global ssh_client, sftp_client, remote_db_path, local_temp_db, db_file_path
+        
+        login = self.login_var.get().strip()
+        remote_dir = self.dir_var.get().strip()
+        password = self.password_var.get()
+        
+        if not login or not remote_dir:
+            self.status_label.config(text="Please fill in all fields")
+            return False
+        
+        # Parse login
+        if '@' in login:
+            username, hostname = login.split('@', 1)
+        else:
+            self.status_label.config(text="Invalid login format. Expected: username@hostname")
+            return False
+        
+        try:
+            self.show_progress("Connecting to remote server...", 10)
+            
+            # Try to connect
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            ssh_client.connect(hostname, username=username, password=password, compress=True)
+            
+            self.show_progress("Connection established", 20)
+            
+            sftp_client = ssh_client.open_sftp()
+            
+            # Check if remote database exists
+            remote_db_path = os.path.join(remote_dir, DB_FILE).replace('\\', '/')
+            
+            self.show_progress("Checking remote database...", 30)
+            
+            try:
+                file_stat = sftp_client.stat(remote_db_path)
+                file_size = file_stat.st_size
+                file_size_mb = file_size / (1024 * 1024)
+            except FileNotFoundError:
+                self.status_label.config(text=f"Database not found at {remote_db_path}")
+                cleanup_ssh()
+                self.hide_progress()
+                return False
+            
+            # Download database to temp file with progress
+            self.show_progress("Downloading database...", 50)
+            
+            local_temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+            local_temp_db.close()
+            
+            # Download with progress callback
+            downloaded = [0]
+            
+            def download_callback(transferred, total):
+                downloaded[0] = transferred
+                progress = int(50 + (transferred * 40 / total))  # 50-90%
+                self.show_progress(f"Downloading database... ({transferred//(1024*1024)} MB)", progress)
+            
+            if file_size > 0:
+                sftp_client.get(remote_db_path, local_temp_db.name, callback=download_callback)
+            else:
+                sftp_client.get(remote_db_path, local_temp_db.name)
+            
+            db_file_path = local_temp_db.name
+            
+            self.show_progress("Download complete!", 100)
+            time.sleep(0.5)
+            self.hide_progress()
+            
+            return True
+            
+        except paramiko.AuthenticationException:
+            cleanup_ssh()
+            self.hide_progress()
+            return False
+        except Exception as e:
+            cleanup_ssh()
+            self.hide_progress()
+            self.status_label.config(text=f"Connection error: {str(e)}")
+            return False
+    
+    def on_ok(self):
+        """Handle OK button click"""
+        global remote_mode, db_file_path
+        
+        if self.mode_var.get() == "local":
+            remote_mode = False
+            db_file_path = DB_FILE
+            self.result = "ok"
+            self.dialog.destroy()
+        else:
+            # Remote mode - try to connect
+            self.status_label.config(text="")
+            
+            if self.setup_remote_connection():
+                remote_mode = True
+                self.result = "ok"
+                self.dialog.destroy()
+            else:
+                self.attempts += 1
+                if self.attempts >= self.max_attempts:
+                    self.status_label.config(text=f"Maximum attempts ({self.max_attempts}) reached")
+                    self.on_cancel()
+                else:
+                    remaining = self.max_attempts - self.attempts
+                    self.status_label.config(text=f"Authentication failed. {remaining} attempts remaining.")
+                    self.password_var.set("")  # Clear password
+    
+    def on_cancel(self):
+        """Handle Cancel button click"""
+        cleanup_ssh()
+        self.result = "cancel"
+        self.dialog.destroy()
+    
+    def show(self):
+        """Show dialog and return result"""
+        self.dialog.wait_window()
+        return self.result
+
+def choose_database_mode():
+    """Choose between local and remote database"""
+    dialog = DatabaseConnectionDialog()
+    result = dialog.show()
+    
+    if result != "ok":
+        sys.exit()
 
 def compress_photo(photo_data, photo_id, photo_type='main'):
     """Compress a single photo"""
@@ -218,6 +617,7 @@ def process_photos_thread(dry_run, output_queue, progress_queue):
                         WHERE id = ?
                     ''', (compressed_data, new_size, photo_id))
                     output_queue.put(f"  ✓ Updated in database\n")
+                    mark_db_changed()
                 except Exception as e:
                     output_queue.put(f"  ✗ Database update failed: {e}\n")
                     conn.rollback()
@@ -236,6 +636,7 @@ def process_photos_thread(dry_run, output_queue, progress_queue):
     output_queue.put(f"Total original size: {format_bytes(total_original_size)}\n")
     output_queue.put(f"Total compressed size: {format_bytes(total_compressed_size)}\n")
     
+    space_saved = 0
     if total_original_size > 0:
         total_reduction = (1 - total_compressed_size / total_original_size) * 100
         space_saved = total_original_size - total_compressed_size
@@ -260,6 +661,18 @@ def process_photos_thread(dry_run, output_queue, progress_queue):
         output_queue.put("\nReclaiming database space...\n")
         conn.execute('VACUUM')
         output_queue.put("✓ Database optimized\n")
+        
+        # Sync with remote if needed
+        if remote_mode and has_db_changes:
+            output_queue.put("\nSyncing with remote database...\n")
+            
+            def sync_progress(text, progress):
+                progress_queue.put(('sync_progress', (text, progress)))
+            
+            if sync_remote_database(sync_progress):
+                output_queue.put("✓ Successfully synced with remote database\n")
+            else:
+                output_queue.put("✗ Failed to sync with remote database\n")
     elif dry_run:
         output_queue.put("\n(DRY RUN - no changes were made)\n")
     
@@ -280,6 +693,10 @@ class CompressionApp:
         self.root.title("Photo Compression Tool")
         self.root.geometry("800x700")
         self.root.minsize(800, 700)
+        
+        # Add mode indicator to title
+        mode_text = f" - Remote Mode" if remote_mode else " - Local Mode"
+        self.root.title("Photo Compression Tool" + mode_text)
         
         # Create notebook for tabs
         self.notebook = ttk.Notebook(root)
@@ -304,6 +721,9 @@ class CompressionApp:
         
         # Update UI periodically
         self.update_ui()
+        
+        # Handle window closing
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
     def create_settings_tab(self):
         # Variables for settings
@@ -414,7 +834,7 @@ class CompressionApp:
         ttk.Button(button_frame, text="Reset Defaults", 
                   command=self.reset_defaults).pack(side='left', padx=5)
         ttk.Button(button_frame, text="Exit", 
-                  command=self.root.quit).pack(side='left', padx=5)
+                  command=self.on_closing).pack(side='left', padx=5)
         
         # Load statistics
         self.load_statistics()
@@ -428,6 +848,10 @@ class CompressionApp:
                  font=('Arial', 12)).pack(anchor='w')
         self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=400)
         self.progress_bar.pack(fill='x', pady=(5, 0))
+        
+        # Sync progress bar (for remote mode)
+        self.sync_progress_label = ttk.Label(progress_frame, text="")
+        self.sync_progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=400)
         
         # Output text
         output_frame = ttk.Frame(self.progress_frame, padding="10")
@@ -495,11 +919,15 @@ class CompressionApp:
         
         # Confirm if not dry run
         if not self.dry_run_var.get():
+            warning_text = "WARNING: This will modify photos in your database!\n\n"
+            warning_text += "It's recommended to backup your database first.\n\n"
+            if remote_mode:
+                warning_text += "Changes will be synced to the remote database.\n\n"
+            warning_text += "Do you want to continue?"
+            
             answer = messagebox.askyesno(
                 "Confirm Compression",
-                "WARNING: This will modify photos in your database!\n\n"
-                "It's recommended to backup your database first.\n\n"
-                "Do you want to continue?",
+                warning_text,
                 icon='warning'
             )
             if not answer:
@@ -517,6 +945,12 @@ class CompressionApp:
         # Clear output
         self.output_text.delete(1.0, tk.END)
         self.progress_bar['value'] = 0
+        self.sync_progress_bar['value'] = 0
+        self.sync_progress_label.config(text="")
+        
+        # Hide sync progress initially
+        self.sync_progress_label.pack_forget()
+        self.sync_progress_bar.pack_forget()
         
         # Switch to progress tab
         self.notebook.select(self.progress_frame)
@@ -548,6 +982,17 @@ class CompressionApp:
                 msg_type, data = self.progress_queue.get_nowait()
                 if msg_type == 'progress':
                     self.progress_bar['value'] = data
+                elif msg_type == 'sync_progress':
+                    text, progress = data
+                    self.sync_progress_label.config(text=text)
+                    self.sync_progress_bar['value'] = progress
+                    
+                    # Show sync progress bars if not visible
+                    if not self.sync_progress_label.winfo_viewable():
+                        progress_frame = self.progress_frame.children['!frame']
+                        self.sync_progress_label.pack(anchor='w', pady=(10, 0))
+                        self.sync_progress_bar.pack(fill='x', pady=(5, 0))
+                        
                 elif msg_type == 'done':
                     self.start_button.config(state='normal')
                     messagebox.showinfo(
@@ -562,6 +1007,21 @@ class CompressionApp:
         
         # Schedule next update
         self.root.after(100, self.update_ui)
+    
+    def on_closing(self):
+        """Handle window closing"""
+        # Check if processing is in progress
+        if self.processing_thread and self.processing_thread.is_alive():
+            answer = messagebox.askyesno(
+                "Exit",
+                "Compression is in progress. Are you sure you want to exit?"
+            )
+            if not answer:
+                return
+        
+        # Clean up SSH connection
+        cleanup_ssh()
+        self.root.destroy()
 
 def analyze_photos():
     """Analyze photos without making changes"""
@@ -645,19 +1105,19 @@ def analyze_photos():
 
 def main():
     """Main entry point"""
-    import os
-    
     print("Database Photo Compression Tool")
     print("==============================\n")
     
-    # Check if database exists
-    if not os.path.exists(DB_FILE):
-        print(f"Error: Database '{DB_FILE}' not found!")
-        return
-    
     # Parse arguments
     if '--analyze' in sys.argv or '-a' in sys.argv:
+        # For analyze mode, ask for database connection first
+        choose_database_mode()
+        if not os.path.exists(db_file_path):
+            print(f"Error: Database '{db_file_path}' not found!")
+            cleanup_ssh()
+            return
         analyze_photos()
+        cleanup_ssh()
     elif '--help' in sys.argv or '-h' in sys.argv:
         print("Usage: python compress_db_photos.py [options]")
         print("\nOptions:")
@@ -665,6 +1125,15 @@ def main():
         print("  -h, --help      Show this help message")
         print("\nWithout options, the program will launch the GUI.")
     else:
+        # Choose database connection mode first
+        choose_database_mode()
+        
+        # Check if database exists
+        if not os.path.exists(db_file_path):
+            print(f"Error: Database '{db_file_path}' not found!")
+            cleanup_ssh()
+            return
+        
         # Launch GUI
         root = tk.Tk()
         app = CompressionApp(root)

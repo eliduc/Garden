@@ -2,6 +2,7 @@
 """
 Plant Database Identifier using Multiple AI Models
 Processes plant photos from database and updates plant information
+Now supports both local and remote database connections via SSH
 """
 
 import os
@@ -16,11 +17,23 @@ from collections import OrderedDict
 import statistics
 import io
 from PIL import Image
+import paramiko
+import tempfile
+import threading
 
 # Configuration
 CONFIG_FILE = 'garden.ini'
 DB_FILE = 'garden_sensors.db'
 MAX_IMAGES_PER_REQUEST = 5  # AI models have limits on number of images
+
+# Remote connection variables
+ssh_client = None
+sftp_client = None
+remote_mode = False
+remote_db_path = None
+local_temp_db = None
+db_file_path = DB_FILE
+has_db_changes = False
 
 # Model configurations
 MODEL_CONFIGS = {
@@ -30,11 +43,294 @@ MODEL_CONFIGS = {
     'PlantNet': {'model': 'plantnet-api', 'name': 'PlantNet API'}
 }
 
+def show_progress(message, progress=0):
+    """Show progress message (console-based for CLI tool)"""
+    bar_length = 50
+    filled_length = int(bar_length * progress / 100)
+    bar = '█' * filled_length + '-' * (bar_length - filled_length)
+    print(f'\r{message} |{bar}| {progress:.1f}%', end='', flush=True)
+    if progress >= 100:
+        print()  # New line when complete
+
+def choose_database_mode():
+    """Choose between local and remote database"""
+    global remote_mode, ssh_client, sftp_client, remote_db_path, local_temp_db, db_file_path
+    
+    print("Plant Database Identifier")
+    print("=" * 25)
+    print("\nSelect database connection mode:")
+    print("1. Local Database")
+    print("2. Remote Database (SSH)")
+    
+    while True:
+        try:
+            choice = input("\nEnter choice (1-2): ").strip()
+            if choice in ['1', '2']:
+                break
+            print("Invalid choice. Please enter 1 or 2.")
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            return False
+    
+    if choice == '1':
+        # Local mode
+        remote_mode = False
+        db_file_path = DB_FILE
+        if not os.path.exists(DB_FILE):
+            print(f"Warning: Local database '{DB_FILE}' not found!")
+            return False
+        print(f"Using local database: {DB_FILE}")
+        return True
+    
+    else:
+        # Remote mode
+        return setup_remote_connection()
+
+def setup_remote_connection():
+    """Setup remote SSH connection and database"""
+    global ssh_client, sftp_client, remote_db_path, local_temp_db, db_file_path, remote_mode
+    
+    # Read config for default values
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE)
+    
+    default_login = ""
+    default_dir = ""
+    try:
+        default_login = config.get('Remote', 'login')
+        default_dir = config.get('Remote', 'dir')
+    except (configparser.NoSectionError, configparser.NoOptionError):
+        pass
+    
+    print("\nRemote Database Connection Setup")
+    print("-" * 35)
+    
+    # Get connection details
+    login = input(f"Login (user@host) [{default_login}]: ").strip() or default_login
+    if not login:
+        print("Error: Login is required")
+        return False
+    
+    if '@' not in login:
+        print("Error: Login format should be username@hostname")
+        return False
+    
+    username, hostname = login.split('@', 1)
+    
+    remote_dir = input(f"Remote directory [{default_dir}]: ").strip() or default_dir
+    if not remote_dir:
+        print("Error: Remote directory is required")
+        return False
+    
+    # Get password
+    import getpass
+    password = getpass.getpass("Password: ")
+    if not password:
+        print("Error: Password is required")
+        return False
+    
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        print(f"\nConnecting to {hostname}... (Attempt {attempt + 1}/{max_attempts})")
+        
+        try:
+            # Create SSH client
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Connect
+            ssh_client.connect(hostname, username=username, password=password, compress=True)
+            print("✓ SSH connection established")
+            
+            # Open SFTP
+            sftp_client = ssh_client.open_sftp()
+            print("✓ SFTP connection established")
+            
+            # Check remote database
+            remote_db_path = os.path.join(remote_dir, DB_FILE).replace('\\', '/')
+            
+            try:
+                file_stat = sftp_client.stat(remote_db_path)
+                file_size = file_stat.st_size
+                file_size_mb = file_size / (1024 * 1024)
+                print(f"✓ Found remote database ({file_size_mb:.1f} MB)")
+                
+            except FileNotFoundError:
+                print("! Remote database not found - this may be a new setup")
+                file_size = 0
+            
+            # Download database
+            print("Downloading database...")
+            local_temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+            local_temp_db.close()
+            
+            if file_size > 0:
+                def download_callback(transferred, total):
+                    progress = (transferred * 100 / total)
+                    show_progress("Downloading", progress)
+                
+                sftp_client.get(remote_db_path, local_temp_db.name, callback=download_callback)
+            else:
+                # Create empty database file
+                temp_conn = sqlite3.connect(local_temp_db.name)
+                temp_conn.close()
+                print("Created new local temporary database")
+            
+            db_file_path = local_temp_db.name
+            
+            # Save settings to config
+            if not config.has_section('Remote'):
+                config.add_section('Remote')
+            config.set('Remote', 'login', login)
+            config.set('Remote', 'dir', remote_dir)
+            
+            with open(CONFIG_FILE, 'w') as f:
+                config.write(f)
+            
+            print("✓ Remote database setup complete!")
+            remote_mode = True
+            return True
+            
+        except paramiko.AuthenticationException:
+            print(f"✗ Authentication failed")
+            if ssh_client:
+                ssh_client.close()
+                ssh_client = None
+            
+            if attempt < max_attempts - 1:
+                print(f"Retrying... ({max_attempts - attempt - 1} attempts remaining)")
+                password = getpass.getpass("Password: ")
+                if not password:
+                    break
+            else:
+                print("Maximum authentication attempts reached")
+                return False
+                
+        except Exception as e:
+            print(f"✗ Connection error: {str(e)}")
+            if ssh_client:
+                ssh_client.close()
+                ssh_client = None
+            return False
+    
+    return False
+
+def sync_remote_database():
+    """Sync local temp database with remote"""
+    global sftp_client, local_temp_db, remote_db_path, has_db_changes
+    
+    if not remote_mode or not sftp_client or not has_db_changes:
+        if remote_mode and not has_db_changes:
+            print("No database changes to sync")
+        return True
+    
+    try:
+        print("\nSyncing database with remote server...")
+        
+        # Ensure all database connections are closed before sync
+        import gc
+        gc.collect()
+        
+        # Get file size for progress
+        if not os.path.exists(local_temp_db.name):
+            print("✗ Local temporary database file not found!")
+            return False
+            
+        file_size = os.path.getsize(local_temp_db.name)
+        file_size_mb = file_size / (1024 * 1024)
+        print(f"Syncing database file ({file_size_mb:.2f} MB)...")
+        
+        # Create backup of remote database first
+        backup_path = remote_db_path + '.backup'
+        try:
+            sftp_client.rename(remote_db_path, backup_path)
+            print("✓ Created backup of remote database")
+        except FileNotFoundError:
+            print("! No existing remote database to backup")
+        except Exception as e:
+            print(f"! Warning: Could not create backup: {e}")
+        
+        # Upload with progress callback
+        uploaded_bytes = [0]
+        def upload_callback(transferred, total):
+            uploaded_bytes[0] = transferred
+            progress = (transferred * 100 / total)
+            show_progress(f"Uploading ({file_size_mb:.1f} MB)", progress)
+        
+        # Upload temp file to remote
+        sftp_client.put(local_temp_db.name, remote_db_path, callback=upload_callback)
+        
+        # Verify upload
+        try:
+            remote_stat = sftp_client.stat(remote_db_path)
+            if remote_stat.st_size == file_size:
+                print("\n✓ Database sync complete and verified!")
+                has_db_changes = False
+                
+                # Remove backup if upload successful
+                try:
+                    sftp_client.remove(backup_path)
+                    print("✓ Backup cleanup complete")
+                except:
+                    pass  # Backup cleanup is not critical
+                    
+                return True
+            else:
+                print(f"\n✗ Sync verification failed! Local: {file_size}, Remote: {remote_stat.st_size}")
+                return False
+        except Exception as e:
+            print(f"\n✗ Sync verification failed: {e}")
+            return False
+        
+    except Exception as e:
+        print(f"\n✗ Sync failed: {str(e)}")
+        
+        # Try to restore backup if sync failed
+        try:
+            backup_path = remote_db_path + '.backup'
+            sftp_client.rename(backup_path, remote_db_path)
+            print("✓ Restored backup due to sync failure")
+        except:
+            print("! Could not restore backup - manual intervention may be needed")
+        
+        return False
+
+def cleanup_ssh():
+    """Clean up SSH connection and temp files"""
+    global ssh_client, sftp_client, local_temp_db
+    
+    if sftp_client:
+        try:
+            sftp_client.close()
+        except:
+            pass
+    
+    if ssh_client:
+        try:
+            ssh_client.close()
+        except:
+            pass
+    
+    if local_temp_db and os.path.exists(local_temp_db.name):
+        try:
+            os.unlink(local_temp_db.name)
+        except:
+            pass
+
 def get_db_connection():
-    """Create a database connection"""
-    conn = sqlite3.connect(DB_FILE, timeout=30.0)
+    """Create a database connection with timeout"""
+    conn = sqlite3.connect(db_file_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    # Enable WAL mode for better concurrency
+    conn.execute('PRAGMA journal_mode=WAL')
     return conn
+
+def mark_db_changed():
+    """Mark that database has been changed"""
+    global has_db_changes
+    has_db_changes = True
+    if remote_mode:
+        print(f"    Database marked as changed (will sync at end)")
 
 def load_api_keys() -> OrderedDict:
     """Load API keys from garden.ini preserving order"""
@@ -602,6 +898,7 @@ def update_plant_in_db(plant_type_id: int, latin_name: str, thresholds: Dict):
                 SET latin_name = ?
                 WHERE id = ?
             ''', (latin_name, plant_type_id))
+            print(f"    Updated latin name: {latin_name}")
         
         # Update thresholds for each season
         for season, values in thresholds.items():
@@ -618,24 +915,22 @@ def update_plant_in_db(plant_type_id: int, latin_name: str, thresholds: Dict):
                 values.get('Tmin', 15),
                 values.get('Tmax', 25)
             ))
+            print(f"    Updated {season} thresholds: T({values.get('Tmin', 15)}-{values.get('Tmax', 25)}°C), H({values.get('Hmin', 30)}-{values.get('Hmax', 70)}%)")
         
         # Commit transaction
         cursor.execute('COMMIT')
         print(f"  ✓ Updated database successfully")
+        mark_db_changed()
         
     except Exception as e:
         cursor.execute('ROLLBACK')
         print(f"  ✗ Error updating database: {e}")
+        raise e  # Re-raise to handle in calling function
     finally:
         conn.close()
 
 def process_plants(full_mode=False):
     """Main function to process all plants in database"""
-    # Check if database exists
-    if not os.path.exists(DB_FILE):
-        print(f"Error: Database '{DB_FILE}' not found!")
-        return
-    
     # Load API keys
     api_keys = load_api_keys()
     if not api_keys:
@@ -769,8 +1064,12 @@ def process_plants(full_mode=False):
             print(f"  Updating database...")
             if latin_name:
                 print(f"    Latin name: {latin_name}")
-            update_plant_in_db(plant['id'], latin_name, thresholds)
-            processed_count += 1
+            try:
+                update_plant_in_db(plant['id'], latin_name, thresholds)
+                processed_count += 1
+            except Exception as e:
+                print(f"  ✗ Failed to update database: {e}")
+                continue
         else:
             print(f"  ✗ No data to update")
         
@@ -784,6 +1083,21 @@ def process_plants(full_mode=False):
     print(f"Processing complete!")
     print(f"Processed: {processed_count} plants")
     print(f"Skipped: {skipped_count} plants")
+    
+    # Sync with remote if needed
+    if remote_mode:
+        if has_db_changes:
+            print(f"\nSyncing {processed_count} plant updates with remote database...")
+            sync_success = sync_remote_database()
+            if sync_success:
+                print("✓ All changes successfully synced to remote database")
+            else:
+                print("✗ Warning: Some changes may not have been synced to remote database")
+                print("  Please check the remote database manually")
+        else:
+            print("\nNo database changes to sync with remote server")
+    
+    return processed_count, skipped_count
 
 def main():
     """Main entry point"""
@@ -804,20 +1118,26 @@ def main():
         print("OpenAI = your_openai_api_key_here  # Optional")
         print("Gemini = your_gemini_api_key_here  # Optional")
         print("PlantNet = your_plantnet_api_key_here  # Optional")
+        print("\nFor remote database access, also add:")
+        print("[Remote]")
+        print("login = username@hostname")
+        print("dir = /path/to/remote/directory")
         print("\nThe first key listed will be the primary model.")
         print("PlantNet will be used for scientific name verification.")
         return
     
     # Show usage if needed
     if '--help' in sys.argv or '-h' in sys.argv:
-        print("Usage: python plantdb_identifier.py [options]")
+        print("Usage: python plant_identifier_db.py [options]")
         print("\nOptions:")
         print("  -f, --full      Query all available models (not just primary)")
         print("  -h, --help      Show this help message")
         print("\nThis script will:")
-        print("  1. Scan all plants in the database")
-        print("  2. Use their photos for identification")
-        print("  3. Update latin names and thresholds")
+        print("  1. Choose database connection mode (local or remote)")
+        print("  2. Scan all plants in the database")
+        print("  3. Use their photos for identification")
+        print("  4. Update latin names and thresholds")
+        print("  5. Sync changes to remote database (if in remote mode)")
         return
     
     try:
@@ -835,19 +1155,67 @@ def main():
             import requests
         except ImportError:
             missing_libs.append("requests")
+        try:
+            import paramiko
+        except ImportError:
+            missing_libs.append("paramiko")
         
         if missing_libs:
             print(f"Note: Some libraries are not installed: {', '.join(missing_libs)}")
-            print("Install them if you plan to use those models.")
+            print("Install them if you plan to use those features.")
+            print("For remote database: pip install paramiko")
             print()
         
-        process_plants(full_mode)
+        try:
+            # Setup database connection
+            if not choose_database_mode():
+                print("Database setup failed. Exiting...")
+                return
+            
+            # Process plants and get results
+            processed, skipped = process_plants(full_mode)
+            
+            # Final summary
+            print(f"\n{'='*60}")
+            print(f"FINAL SUMMARY:")
+            print(f"{'='*60}")
+            print(f"Total plants processed: {processed}")
+            print(f"Total plants skipped: {skipped}")
+            
+            if remote_mode:
+                if has_db_changes:
+                    print(f"Remote database: ✗ SYNC INCOMPLETE")
+                    print(f"Please run the script again or check the remote connection")
+                else:
+                    print(f"Remote database: ✓ All changes synced")
+            else:
+                print(f"Local database: ✓ All changes saved")
+            
+        except Exception as db_error:
+            print(f"\nDatabase error: {db_error}")
+            if remote_mode and has_db_changes:
+                print("Warning: There may be unsaved changes!")
+                print("Attempting emergency sync...")
+                try:
+                    if sync_remote_database():
+                        print("✓ Emergency sync successful")
+                    else:
+                        print("✗ Emergency sync failed")
+                except:
+                    print("✗ Emergency sync failed")
+            raise db_error
+        finally:
+            # Always cleanup SSH connection
+            cleanup_ssh()
+            
     except KeyboardInterrupt:
         print("\n\nProcess interrupted by user")
+        cleanup_ssh()
     except Exception as e:
         print(f"\nUnexpected error: {e}")
         import traceback
         traceback.print_exc()
+        cleanup_ssh()
 
 if __name__ == "__main__":
     main()

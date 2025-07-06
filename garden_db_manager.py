@@ -8,16 +8,37 @@ import shutil
 from PIL import Image, ImageTk
 import json
 import io
+import configparser
+import paramiko
+import tempfile
+import threading
+from tkinter import simpledialog
 
 class GardenDatabaseManager:
     def __init__(self, root):
         self.root = root
         self.root.title("Garden Database Manager")
         self.root.geometry("1200x700")
+        self.root.withdraw()  # Скрываем главное окно временно
+        
+        # SSH connection variables
+        self.ssh_client = None
+        self.sftp_client = None
+        self.remote_mode = False
+        self.remote_db_path = None
+        self.local_temp_db = None
         
         # Database connection
         self.db_file = 'garden_sensors.db'
         self.conn = None
+        
+        # Check for connection mode
+        self.choose_connection_mode()
+        
+        # Показываем главное окно после выбора режима
+        self.root.deiconify()
+        
+        # Connect to database
         self.connect_db()
         
         # Check and update database schema
@@ -29,6 +50,300 @@ class GardenDatabaseManager:
         # Load initial data
         self.load_plant_types()
         self.load_gardens()
+    
+    def choose_connection_mode(self):
+        """Let user choose between local and remote database"""
+        dialog = tk.Toplevel()
+        dialog.title("Database Connection Mode")
+        dialog.geometry("400x200")
+        
+        # Center dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        dialog.transient()
+        dialog.grab_set()
+        
+        # Create frame
+        frame = ttk.Frame(dialog, padding="20")
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text="Select Database Connection Mode:", 
+                 font=("Arial", 12)).pack(pady=(0, 20))
+        
+        mode_var = tk.StringVar(value="local")
+        
+        ttk.Radiobutton(frame, text="Local Database", 
+                       variable=mode_var, value="local").pack(anchor='w', pady=5)
+        ttk.Radiobutton(frame, text="Remote Database (SSH)", 
+                       variable=mode_var, value="remote").pack(anchor='w', pady=5)
+        
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(pady=(20, 0))
+        
+        result = {'mode': None}
+        
+        def on_ok():
+            result['mode'] = mode_var.get()
+            dialog.destroy()
+        
+        def on_cancel():
+            dialog.destroy()
+            sys.exit()
+        
+        ttk.Button(button_frame, text="OK", command=on_ok).pack(side='left', padx=5)
+        ttk.Button(button_frame, text="Cancel", command=on_cancel).pack(side='left', padx=5)
+        
+        dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+        dialog.wait_window()
+        
+        if result['mode'] == "remote":
+            self.remote_mode = True
+            self.setup_remote_connection()
+        else:
+            self.remote_mode = False
+    
+    def setup_remote_connection(self):
+        """Setup SSH connection to remote database"""
+        try:
+            # Read config
+            config = configparser.ConfigParser()
+            config_file = 'garden.ini'
+            config.read(config_file)
+            
+            # Get remote settings
+            try:
+                login = config.get('Remote', 'login')
+                remote_dir = config.get('Remote', 'dir')
+            except (configparser.NoSectionError, configparser.NoOptionError) as e:
+                messagebox.showerror("Configuration Error", 
+                                   f"Remote settings not found in garden.ini: {e}")
+                sys.exit()
+            
+            # Parse login
+            if '@' in login:
+                username, hostname = login.split('@')
+            else:
+                messagebox.showerror("Configuration Error", 
+                                   "Invalid login format. Expected: username@hostname")
+                sys.exit()
+            
+            # Ask for password
+            password = simpledialog.askstring("SSH Password", 
+                                            f"Enter password for {login}:", 
+                                            show='*')
+            if not password:
+                sys.exit()
+            
+            # Create progress dialog
+            progress_dialog = tk.Toplevel()
+            progress_dialog.title("Connecting...")
+            progress_dialog.geometry("300x100")
+            progress_dialog.transient()
+            progress_dialog.grab_set()
+            
+            # Center dialog
+            progress_dialog.update_idletasks()
+            x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
+            y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
+            progress_dialog.geometry(f"+{x}+{y}")
+            
+            progress_label = ttk.Label(progress_dialog, text="Connecting to remote server...", 
+                                     font=("Arial", 10))
+            progress_label.pack(expand=True)
+            
+            progress_dialog.update()
+            
+            # Connect SSH
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            try:
+                self.ssh_client.connect(hostname, username=username, password=password, 
+                                       compress=True)  # Включаем сжатие для узкого канала
+                self.sftp_client = self.ssh_client.open_sftp()
+                
+                # Check if remote database exists
+                self.remote_db_path = os.path.join(remote_dir, self.db_file).replace('\\', '/')
+                
+                try:
+                    remote_stat = self.sftp_client.stat(self.remote_db_path)
+                    remote_size = remote_stat.st_size
+                    
+                    # Предупреждение для больших файлов
+                    if remote_size > 50 * 1024 * 1024:  # 50MB
+                        progress_label.config(text=f"Large database detected ({remote_size // 1024 // 1024}MB). This may take a while...")
+                        progress_dialog.update()
+                        
+                except FileNotFoundError:
+                    progress_dialog.destroy()
+                    if messagebox.askyesno("Database Not Found", 
+                                         f"Database not found at {self.remote_db_path}.\n"
+                                         "Create new database?"):
+                        # Create empty database on remote
+                        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+                        temp_db.close()
+                        
+                        # Create minimal database structure
+                        temp_conn = sqlite3.connect(temp_db.name)
+                        temp_conn.close()
+                        
+                        self.sftp_client.put(temp_db.name, self.remote_db_path)
+                        os.unlink(temp_db.name)
+                    else:
+                        self.cleanup_ssh()
+                        sys.exit()
+                
+                # Download database to temp file
+                progress_label.config(text="Downloading database...")
+                progress_dialog.update()
+                
+                self.local_temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+                self.local_temp_db.close()
+                
+                # Загружаем с callback для прогресса
+                def download_callback(transferred, total):
+                    percent = int(transferred * 100 / total)
+                    progress_label.config(text=f"Downloading database... {percent}%")
+                    progress_dialog.update()
+                
+                self.sftp_client.get(self.remote_db_path, self.local_temp_db.name, callback=download_callback)
+                self.db_file = self.local_temp_db.name
+                
+                progress_dialog.destroy()
+                
+                # Update window title to show remote mode
+                self.root.title(f"Garden Database Manager - Remote: {login}")
+                
+                # Add status bar
+                self.create_status_bar()
+                self.update_status(f"Connected to {login}")
+                
+            except Exception as e:
+                progress_dialog.destroy()
+                messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
+                self.cleanup_ssh()
+                sys.exit()
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to setup remote connection: {str(e)}")
+            sys.exit()
+    
+    def create_status_bar(self):
+        """Create status bar for remote connection info"""
+        if not hasattr(self, 'status_bar'):
+            self.status_bar = ttk.Frame(self.root)
+            self.status_bar.pack(side='bottom', fill='x')
+            
+            self.status_label = ttk.Label(self.status_bar, text="", relief='sunken')
+            self.status_label.pack(side='left', fill='x', expand=True, padx=2, pady=2)
+            
+            if self.remote_mode:
+                # Кнопка синхронизации
+                ttk.Button(self.status_bar, text="Sync", 
+                          command=self.sync_remote_db).pack(side='right', padx=5)
+                
+                # Индикатор изменений
+                self.changes_label = ttk.Label(self.status_bar, text="No changes", 
+                                             foreground="green")
+                self.changes_label.pack(side='right', padx=10)
+                
+                # Отслеживаем изменения в БД
+                self.track_changes = True
+                self.has_changes = False
+    
+    def update_status(self, message):
+        """Update status bar message"""
+        if hasattr(self, 'status_label'):
+            self.status_label.config(text=f" {message}")
+    
+    def mark_changed(self):
+        """Отметить что БД изменена (для удаленного режима)"""
+        if self.remote_mode and hasattr(self, 'changes_label'):
+            self.has_changes = True
+            self.changes_label.config(text="Changes pending", foreground="red")
+    
+    def sync_remote_db(self):
+        """Sync local temp database with remote"""
+        if not self.remote_mode or not self.sftp_client:
+            return
+        
+        try:
+            # Close current connection
+            if self.conn:
+                self.conn.close()
+            
+            # Show progress
+            progress_dialog = tk.Toplevel(self.root)
+            progress_dialog.title("Syncing...")
+            progress_dialog.geometry("300x100")
+            progress_dialog.transient(self.root)
+            progress_dialog.grab_set()
+            
+            # Center dialog
+            progress_dialog.update_idletasks()
+            x = (progress_dialog.winfo_screenwidth() // 2) - (progress_dialog.winfo_width() // 2)
+            y = (progress_dialog.winfo_screenheight() // 2) - (progress_dialog.winfo_height() // 2)
+            progress_dialog.geometry(f"+{x}+{y}")
+            
+            progress_label = ttk.Label(progress_dialog, text="Uploading database...", 
+                                     font=("Arial", 10))
+            progress_label.pack(expand=True)
+            progress_dialog.update()
+            
+            # Get file size
+            file_size = os.path.getsize(self.local_temp_db.name)
+            
+            # Upload with progress callback
+            def upload_callback(transferred, total):
+                percent = int(transferred * 100 / total)
+                progress_label.config(text=f"Uploading database... {percent}%")
+                progress_dialog.update()
+            
+            # Upload temp file to remote
+            self.sftp_client.put(self.local_temp_db.name, self.remote_db_path, 
+                               callback=upload_callback)
+            
+            progress_dialog.destroy()
+            
+            # Reopen connection
+            self.connect_db()
+            
+            # Reset changes indicator
+            self.has_changes = False
+            if hasattr(self, 'changes_label'):
+                self.changes_label.config(text="No changes", foreground="green")
+            
+            self.update_status("Sync completed successfully")
+            messagebox.showinfo("Success", "Database synced with remote server")
+            
+        except Exception as e:
+            if 'progress_dialog' in locals():
+                progress_dialog.destroy()
+            self.update_status("Sync failed")
+            messagebox.showerror("Sync Error", f"Failed to sync database: {str(e)}")
+    
+    def cleanup_ssh(self):
+        """Clean up SSH connection and temp files"""
+        if self.sftp_client:
+            try:
+                self.sftp_client.close()
+            except:
+                pass
+        
+        if self.ssh_client:
+            try:
+                self.ssh_client.close()
+            except:
+                pass
+        
+        if self.local_temp_db and os.path.exists(self.local_temp_db.name):
+            try:
+                os.unlink(self.local_temp_db.name)
+            except:
+                pass
     
     def connect_db(self):
         """Connect to database"""
@@ -229,6 +544,8 @@ class GardenDatabaseManager:
                   command=self.configure_sensor).pack(side='left', padx=5)
         ttk.Button(control_frame, text="Refresh", 
                   command=self.load_garden_plants).pack(side='left', padx=5)
+        ttk.Button(control_frame, text="Растения и датчики", 
+                  command=self.export_plants_sensors).pack(side='left', padx=5)
         
         # Main content frame
         content_frame = ttk.Frame(tab)
@@ -928,6 +1245,125 @@ class GardenDatabaseManager:
         else:
             self.photo_label.config(image='', text='No photo')
             
+    def export_plants_sensors(self):
+        """Export plants and sensors information to garden.txt"""
+        try:
+            cursor = self.conn.cursor()
+            
+            # Query to get all plants with their sensors
+            cursor.execute('''
+                SELECT 
+                    gl.name as garden_name,
+                    gp.unique_id,
+                    gp.custom_name,
+                    pt.name as plant_type,
+                    gp.position_x,
+                    gp.position_y,
+                    gp.has_sensor,
+                    gp.sensor_name,
+                    gp.sensor_id
+                FROM garden_plants gp
+                JOIN plant_types pt ON gp.plant_type_id = pt.id
+                JOIN garden_layouts gl ON gp.garden_layout_id = gl.id
+                WHERE gl.is_active = 1
+                ORDER BY gp.custom_name, pt.name
+            ''')
+            
+            plants = cursor.fetchall()
+            
+            # Write to file
+            with open('garden.txt', 'w', encoding='utf-8') as f:
+                f.write("СПИСОК РАСТЕНИЙ И ДАТЧИКОВ\n")
+                f.write("=" * 80 + "\n")
+                f.write(f"Дата формирования: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write("=" * 80 + "\n\n")
+                
+                # Group by garden
+                current_garden = None
+                plant_count = 0
+                sensor_count = 0
+                
+                for plant in plants:
+                    # Check if we're in a new garden
+                    if current_garden != plant['garden_name']:
+                        if current_garden is not None:
+                            f.write("\n")
+                        current_garden = plant['garden_name']
+                        f.write(f"САД: {current_garden}\n")
+                        f.write("-" * 80 + "\n")
+                    
+                    plant_count += 1
+                    plant_name = plant['custom_name'] or plant['plant_type']
+                    
+                    f.write(f"\nРастение #{plant_count}:\n")
+                    f.write(f"  Название: {plant_name}\n")
+                    f.write(f"  Тип: {plant['plant_type']}\n")
+                    f.write(f"  ID: {plant['unique_id']}\n")
+                    f.write(f"  Позиция: ({plant['position_x']}, {plant['position_y']})\n")
+                    
+                    if plant['has_sensor']:
+                        sensor_count += 1
+                        f.write(f"  ДАТЧИК:\n")
+                        f.write(f"    Номер датчика (Sensor Name): {plant['sensor_name']}\n")
+                        f.write(f"    ID датчика (Sensor ID): {plant['sensor_id']}\n")
+                    else:
+                        f.write(f"  Датчик: НЕТ\n")
+                
+                # Summary
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("ИТОГО:\n")
+                f.write(f"  Всего растений: {plant_count}\n")
+                f.write(f"  Растений с датчиками: {sensor_count}\n")
+                f.write(f"  Растений без датчиков: {plant_count - sensor_count}\n")
+                
+                # List of all sensors
+                if sensor_count > 0:
+                    f.write("\n" + "=" * 80 + "\n")
+                    f.write("СПИСОК ВСЕХ ДАТЧИКОВ:\n")
+                    f.write("-" * 80 + "\n")
+                    
+                    cursor.execute('''
+                        SELECT 
+                            gp.sensor_name,
+                            gp.sensor_id,
+                            gp.custom_name,
+                            pt.name as plant_type
+                        FROM garden_plants gp
+                        JOIN plant_types pt ON gp.plant_type_id = pt.id
+                        JOIN garden_layouts gl ON gp.garden_layout_id = gl.id
+                        WHERE gl.is_active = 1 AND gp.has_sensor = 1
+                        ORDER BY CAST(gp.sensor_name AS INTEGER)
+                    ''')
+                    
+                    sensors = cursor.fetchall()
+                    
+                    f.write(f"\n{'Номер':<10} {'ID датчика':<25} {'Растение':<30}\n")
+                    f.write("-" * 80 + "\n")
+                    
+                    for sensor in sensors:
+                        plant_name = sensor['custom_name'] or sensor['plant_type']
+                        f.write(f"{sensor['sensor_name']:<10} {sensor['sensor_id']:<25} {plant_name:<30}\n")
+            
+            messagebox.showinfo("Успех", 
+                               f"Информация экспортирована в файл garden.txt\n\n"
+                               f"Растений: {plant_count}\n"
+                               f"С датчиками: {sensor_count}")
+            
+            # Optionally open the file
+            if messagebox.askyesno("Открыть файл?", "Хотите открыть файл garden.txt?"):
+                import subprocess
+                import platform
+                
+                if platform.system() == 'Windows':
+                    subprocess.Popen(['notepad', 'garden.txt'])
+                elif platform.system() == 'Darwin':  # macOS
+                    subprocess.Popen(['open', 'garden.txt'])
+                else:  # Linux
+                    subprocess.Popen(['xdg-open', 'garden.txt'])
+                    
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Не удалось экспортировать данные: {e}")
+            
     # Thresholds methods
     def update_plant_type_combos(self):
         """Update plant type combo boxes"""
@@ -1118,11 +1554,6 @@ class GardenDatabaseManager:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete readings: {e}")
                 
-    def __del__(self):
-        """Clean up database connection"""
-        if hasattr(self, 'conn') and self.conn:
-            self.conn.close()
-    
     # Plant Photos methods
     def load_plants_for_photos(self):
         """Load plants list for photo management"""
@@ -1411,6 +1842,22 @@ class GardenDatabaseManager:
                 self.photo_preview_label.config(image='', text=f'Error loading image:\n{e}')
         else:
             self.photo_preview_label.config(image='', text='No photo data')
+            
+    def __del__(self):
+        """Clean up database connection and SSH"""
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+        
+        # Auto-sync on close if in remote mode
+        if hasattr(self, 'remote_mode') and self.remote_mode:
+            try:
+                if hasattr(self, 'sftp_client') and self.sftp_client:
+                    # Final sync
+                    self.sftp_client.put(self.local_temp_db.name, self.remote_db_path)
+            except:
+                pass
+            
+            self.cleanup_ssh()
 
 
 # Dialog classes

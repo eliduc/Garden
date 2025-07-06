@@ -966,6 +966,7 @@
             let details = `<p><strong>Species:</strong> ${plant.species || 'N/A'}</p>`;
             
             if(plant.has_sensor) {
+                details += `<p><strong>Sensor Name:</strong> ${plant.sensor_name || 'N/A'}</p>`;
                 details += `<p><strong>Sensor ID:</strong> ${plant.sensor_id || 'N/A'}</p>`;
                 const data = sensorData[plant.sensor_id];
                 if (data) {
